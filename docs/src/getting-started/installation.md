@@ -32,7 +32,7 @@ You'll be prompted for an authentication token. Contact your registry administra
 Alternatively, clone the [Buffrs Repository] and build locally:
 
 ```bash
-git clone https://github.com/helsing-ai/buffrs
+git clone https://github.com/globusmedical/buffrs
 cd buffrs
 cargo install --path .
 ```
@@ -42,4 +42,4 @@ cargo install --path .
 **Next**: [First Steps with Buffrs](first-steps.md)
 
 [crates.io]: https://crates.io
-[Buffrs Repository]: https://github.com/helsing-ai/buffrs
+[Buffrs Repository]: https://github.com/globusmedical/buffrs

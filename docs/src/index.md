@@ -40,4 +40,4 @@ buffrs publish
 
 ---
 
-**Need help?** Check the [FAQ](faq.md) or visit our [GitHub repository](https://github.com/helsing-ai/buffrs).
+**Need help?** Check the [FAQ](faq.md) or visit our [GitHub repository](https://github.com/globusmedical/buffrs).
