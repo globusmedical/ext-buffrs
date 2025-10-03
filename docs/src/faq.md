@@ -2,19 +2,26 @@
 
 ## Why doesn't `buffrs add`, `buffrs publish`, or `buffrs login` work anymore?
 
-We recently expanded the capabilities of Buffrs a bit and made it so it can
-handle being connected to multiple registries. For this reason, you'll have to
-add `--registry http://my-registry.jfrog.io/artifactory` to all three.
+> [!IMPORTANT]
+> Recent versions of Buffrs support multiple registries. Commands now require the `--registry` flag.
 
-Note that `buffrs login` had a `--url` flag previously. It was renamed to
-`--registry` for the sake of consistency.
+We expanded Buffrs to handle connections to multiple registries simultaneously. Add `--registry https://your-registry.com/artifactory` to these commands:
+
+```bash
+buffrs add --registry https://your-registry.com/artifactory <package>
+buffrs publish --registry https://your-registry.com/artifactory
+buffrs login --registry https://your-registry.com/artifactory
+```
+
+> [!NOTE]
+> The `buffrs login` flag was renamed from `--url` to `--registry` for consistency.
 
 ## Why is my `credentials.toml` file broken?
 
-Because we expanded Buffrs and made it capable of connecting to multiple
-registries, we had to make some changes to how we store our credentials.
+> [!IMPORTANT]
+> The credentials file format changed to support multiple registries.
 
-When it only supported a single registry, it looked like this:
+**Old format** (single registry):
 
 ```toml
 [artifactory]
@@ -22,7 +29,7 @@ url = "https://org.jfrog.io/artifactory"
 password = "some-token"
 ```
 
-And now it looks like this, supporting multiple regisitries:
+**New format** (multiple registries):
 
 ```toml
 [[credentials]]
@@ -34,8 +41,21 @@ uri = "https://org2.jfrog.io/artifactory"
 token = "some-other-token"
 ```
 
+> [!TIP]
+> Run `buffrs login --registry <url>` to automatically update your credentials file.
+
 ## Why can't I log in with a username?
 
-`buffrs login` no longer supports the `--username` flag, as we no longer use
-BasicAuth. Instead we set the `Authorization` header which enables support for
-identity tokens, jwt, and encoded basic auth tokens at the same time.
+> [!IMPORTANT]
+> Username-based authentication is no longer supported. Use tokens instead.
+
+The `--username` flag has been removed in favor of token-based authentication. This enables support for:
+
+- Identity tokens
+- JWT tokens
+- Encoded basic auth tokens
+
+All authentication now uses the `Authorization` header for better security and flexibility.
+
+> [!TIP]
+> Generate an access token from your registry provider and use `buffrs login --registry <url>` to store it.

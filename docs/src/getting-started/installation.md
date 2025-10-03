@@ -1,31 +1,45 @@
 ## Installation
 
-### Install Buffrs
+### Install from crates.io
 
-The easiest way to get `buffrs` is to install the current stable release from
-[crates.io] using:
+The easiest way to install `buffrs` is from [crates.io]:
 
 ```bash
 cargo install buffrs
 ```
 
-As of right now you are required to authenticate yourself against your private
-artifactory instance (which will be replaced by the Buffrs Registry in Q4
-2023).
-
-Logging in to your instance is done using the following `buffrs` command:
+### Verify Installation
 
 ```bash
-buffrs login --registry https://<organization>.jfrog.io/artifactory
+buffrs --version
 ```
 
-You will be prompted for an artifactory identity token which you can create
-within the artifactory user interface or programmatically through terraform.
+### Authenticate with a Registry
 
-### Build and Install Buffrs from Source
+To publish packages or access private dependencies, authenticate with your registry:
 
-As alternative installation method you can clone the [Buffrs Repository] and
-install it locally using Cargo (`cargo install --path .`).
+```bash
+buffrs login --registry https://your-registry.example.com/artifactory
+```
+
+You'll be prompted for an authentication token. Contact your registry administrator for credentials.
+
+> [!TIP]
+> You can authenticate with multiple registries. Each registry uses separate credentials stored securely in your `~/.config/buffrs/credentials.toml`.
+
+### Build from Source
+
+Alternatively, clone the [Buffrs Repository] and build locally:
+
+```bash
+git clone https://github.com/helsing-ai/buffrs
+cd buffrs
+cargo install --path .
+```
+
+---
+
+**Next**: [First Steps with Buffrs](first-steps.md)
 
 [crates.io]: https://crates.io
 [Buffrs Repository]: https://github.com/helsing-ai/buffrs
