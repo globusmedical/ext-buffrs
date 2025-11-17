@@ -2,42 +2,42 @@
 
 ![Buffrs Logo](images/buffrs.svg)
 
-Buffrs is a protocol buffers package manager. Buffrs downloads your projects
-protocol buffer dependencies, creates distributable packages for libraries and
-apis, and uploads them to a package registry.
+**Buffrs is a package manager for Protocol Buffers.** It helps you manage dependencies, create distributable packages, and publish them to registries—bringing modern package management to your protobuf workflow.
 
-### Sections
+## Quick Start
 
-**[Getting Started](getting-started/index.md)**
+```bash
+# Install Buffrs
+cargo install buffrs
 
-To get started with Buffrs, install it and set
-up your first package.
+# Initialize a new API package
+buffrs init --api
 
-**[Buffrs Guide](guide/index.md)**
+# Add a dependency
+buffrs add --registry https://your.registry.com datatypes/user@=0.1.0
 
-An in-depth guide on how to use Buffrs to
-distribute protocol buffers.
+# Publish your package
+buffrs publish
+```
 
-**[Buffrs Integrations](integration/index.md)**
+[Get started →](getting-started/index.md)
 
-Learn how to integrate Buffrs into existing
-build tools for a seamless development
-experience.
+## Why Buffrs?
 
-**[Buffrs Reference](reference/index.md)**
+- **📦 Dependency Management**: Version and distribute protobuf definitions like any modern package
+- **🔄 Multi-Registry Support**: Connect to multiple registries simultaneously
+- **🛠️ Build Tool Integration**: Works seamlessly with Cargo, Poetry, npm, and more
+- **🚀 Simple Workflow**: Familiar commands inspired by Cargo and npm
 
-Detailed aspects of Buffrs behavior, including
-advanced configuration and troubleshooting
-resources.
+## Documentation
 
-**[Buffrs Registry Reference](registry/index.md)**
+| Section | Description |
+|---------|-------------|
+| **[Getting Started](getting-started/index.md)** | Install Buffrs and create your first package |
+| **[Buffrs Guide](guide/index.md)** | Learn core concepts and best practices |
+| **[Commands Reference](commands/index.md)** | Complete CLI command documentation |
+| **[FAQ](faq.md)** | Common questions and troubleshooting |
 
-Advanced resources on the Buffrs Registry.
+---
 
-**[Buffrs Commands](commands/index.md)**
-
-Detailed documentation of the commands of the
-Buffrs CLI.
-
-[buff.rs]: https://buff.rs/
-[GitHub]: https://github.com/helsing-ai/buffrs/tree/main/src/docs
+**Need help?** Check the [FAQ](faq.md) or visit our [GitHub repository](https://github.com/globusmedical/buffrs).

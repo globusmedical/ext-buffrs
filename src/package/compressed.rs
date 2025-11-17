@@ -26,9 +26,9 @@ use tokio::fs;
 use crate::{
     errors::{DeserializationError, SerializationError},
     lock::{Digest, DigestAlgorithm, LockedPackage},
-    manifest::{self, Edition, Manifest, MANIFEST_FILE},
+    manifest::{self, Edition, Manifest, PublishableManifest, ResolvedManifest},
     package::PackageName,
-    registry::RegistryUri,
+    registry::RegistryRef,
     ManagedFile,
 };
 
@@ -41,53 +41,34 @@ pub struct Package {
     pub tgz: Bytes,
 }
 
+pub struct Tarball(Vec<u8>);
+
 impl Package {
     /// Create new [`Package`] from [`Manifest`] and list of files.
     ///
     /// This intentionally uses a [`BTreeMap`] to ensure that the list of files is sorted
     /// lexicographically. This ensures a reproducible output.
     pub fn create(mut manifest: Manifest, files: BTreeMap<PathBuf, Bytes>) -> miette::Result<Self> {
+        // Create a new conforming manifest if the edition is unknown
         if manifest.edition == Edition::Unknown {
-            manifest = Manifest::new(manifest.package, manifest.dependencies);
+            manifest = Manifest::new(manifest.package.clone(), manifest.dependencies.clone());
         }
 
+        // Ensure the manifest has a package declaration
         if manifest.package.is_none() {
             return Err(miette!(
-                "failed to create package, manifest doesnt contain a package declaration"
+                "failed to create package, manifest doesn't contain a package declaration"
             ));
         }
 
         let mut archive = tar::Builder::new(Vec::new());
 
-        let manifest_bytes = {
-            let as_str: String = manifest
-                .clone()
-                .try_into()
-                .into_diagnostic()
-                .wrap_err(SerializationError(ManagedFile::Manifest))?;
+        // Add original and resolved manifests
+        let resolve_manifest: ResolvedManifest = manifest.clone().try_into()?;
+        Self::add_manifest_to_archive(&mut archive, resolve_manifest)?;
+        Self::add_manifest_to_archive(&mut archive, manifest.clone())?;
 
-            as_str.into_bytes()
-        };
-
-        let mut header = tar::Header::new_gnu();
-
-        header.set_size(
-            manifest_bytes
-                .len()
-                .try_into()
-                .into_diagnostic()
-                .wrap_err(miette!(
-                    "serialized manifest was too large to fit in a tarball"
-                ))?,
-        );
-
-        header.set_mode(0o444);
-
-        archive
-            .append_data(&mut header, MANIFEST_FILE, Cursor::new(manifest_bytes))
-            .into_diagnostic()
-            .wrap_err(miette!("failed to add manifest to release"))?;
-
+        // Add files to the archive
         for (name, contents) in &files {
             let mut header = tar::Header::new_gnu();
             header.set_mode(0o444);
@@ -98,25 +79,64 @@ impl Package {
                 .wrap_err(miette!("failed to add proto {name:?} to release tar"))?;
         }
 
-        let tar = archive
-            .into_inner()
+        // Finalize tarball
+        let tar = Tarball(
+            archive
+                .into_inner()
+                .into_diagnostic()
+                .wrap_err(miette!("failed to assemble tar package"))?,
+        );
+
+        Ok(Self {
+            manifest,
+            tgz: tar.compress()?,
+        })
+    }
+
+    /// Helper to add a manifest (original or resolved) to the tarball.
+    fn add_manifest_to_archive<M>(
+        archive: &mut tar::Builder<Vec<u8>>,
+        manifest: M,
+    ) -> miette::Result<()>
+    where
+        M: PublishableManifest + TryInto<String, Error = toml::ser::Error>,
+    {
+        let manifest_bytes = {
+            let as_str: String = manifest
+                .try_into()
+                .into_diagnostic()
+                .wrap_err(SerializationError(ManagedFile::Manifest))?;
+
+            // Prepend the prefix if provided
+            let mut result = String::new();
+            if let Some(prefix_text) = M::header() {
+                result.push_str(prefix_text);
+            }
+            result.push_str(&as_str);
+            result.into_bytes()
+        };
+
+        let mut header = tar::Header::new_gnu();
+        header.set_size(
+            manifest_bytes
+                .len()
+                .try_into()
+                .into_diagnostic()
+                .wrap_err(miette!(
+                    "serialized manifest `{}` was too large to fit in a tarball",
+                    M::file_name()
+                ))?,
+        );
+        header.set_mode(0o444);
+
+        archive
+            .append_data(&mut header, M::file_name(), Cursor::new(manifest_bytes))
             .into_diagnostic()
-            .wrap_err(miette!("failed to assemble tar package"))?;
-
-        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-
-        encoder
-            .write_all(&tar)
-            .into_diagnostic()
-            .wrap_err(miette!("failed to compress release"))?;
-
-        let tgz: Bytes = encoder
-            .finish()
-            .into_diagnostic()
-            .wrap_err(miette!("failed to finalize package"))?
-            .into();
-
-        Ok(Self { manifest, tgz })
+            .wrap_err(miette!(
+                "failed to add manifest `{}` to release",
+                M::file_name()
+            ))?;
+        Ok(())
     }
 
     /// Unpack a package to a specific path.
@@ -188,9 +208,9 @@ impl Package {
 
         let manifest = String::from_utf8(manifest)
             .into_diagnostic()
-            .wrap_err(miette!("manifest has invalid character encoding"))?
-            .parse()
-            .into_diagnostic()?;
+            .wrap_err(miette!("manifest has invalid character encoding"))?;
+
+        let manifest = Manifest::try_parse(manifest.as_str(), None)?;
 
         Ok(Self { manifest, tgz })
     }
@@ -229,7 +249,7 @@ impl Package {
     /// Lock this package
     pub fn lock(
         &self,
-        registry: RegistryUri,
+        registry: RegistryRef,
         repository: String,
         dependants: usize,
     ) -> LockedPackage {
@@ -242,5 +262,21 @@ impl TryFrom<Bytes> for Package {
 
     fn try_from(tgz: Bytes) -> Result<Self, Self::Error> {
         Package::parse(tgz)
+    }
+}
+
+impl Tarball {
+    /// Compress the tarball into a `.tgz` file.
+    pub fn compress(&self) -> miette::Result<Bytes> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder
+            .write_all(&self.0)
+            .into_diagnostic()
+            .wrap_err(miette!("failed to compress tarball"))?;
+        let tgz = encoder
+            .finish()
+            .into_diagnostic()
+            .wrap_err(miette!("failed to finalize compressed tarball"))?;
+        Ok(tgz.into())
     }
 }

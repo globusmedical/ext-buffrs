@@ -1,34 +1,31 @@
 ## First Steps with Buffrs
 
-This section gives you a quick intro to the `buffrs` command line
-interface. Let us take a look at its ability to declare protocol buffer
-dependencies and to publish new packages to
-the registry.
+Let's create your first Protocol Buffer package with Buffrs.
 
-To initialize a new project with Buffrs, use [`buffrs init`](../commands/buffrs-init.md):
+### 1. Initialize a New Package
+
+Create a new API package:
 
 ```bash
-$ mkdir web-server && cd web-server
-$ buffrs init --api
+mkdir web-server && cd web-server
+buffrs init --api
 ```
 
-> Note: By omitting the `--api` flag (or `--lib` flag respectively) you
-> instruct Buffrs to not declare a local package and setup the project to be a
-> consumer-only (e.g. a server implementation).
+This creates:
 
-
-
-```bash
-$ tree .
+```
 .
-├── Proto.toml
-└── proto
-    └── vendor
-
-2 directories, 1 file
+├── Proto.toml          # Package manifest
+└── proto/              # Your .proto files
+    └── vendor/         # Dependencies install here
 ```
 
-This is all we need to get started. Now let’s check out the newly created `Proto.toml`:
+> [!NOTE]
+> Use `--lib` for library packages, or omit both flags for consumer-only projects (e.g., server implementations without protobuf definitions to publish).
+
+### 2. Review the Manifest
+
+The `Proto.toml` file defines your package:
 
 ```toml
 [package]
@@ -39,20 +36,15 @@ type = "api"
 [dependencies]
 ```
 
-This is called a Buffrs Manifest, and it contains all of the metadata that
-Buffrs needs to know about your package to install dependencies and distribute
-your protocol buffers as a package.
+### 3. Add a Dependency
 
-Let us define a dependency of the webserver on a hypothetical library
-called `user` in the `datatypes` repository.
-
-This is done by invoking [`buffrs add`](../commands/buffrs-add.md):
+Add a package from your registry:
 
 ```bash
-$ buffrs add --registry https://your.registry.com datatypes/user@=0.1.0
+buffrs add --registry https://your.registry.com datatypes/user@=0.1.0
 ```
 
-The result is a dependency in the `Proto.toml`:
+This updates `Proto.toml`:
 
 ```toml
 [dependencies.user]
@@ -61,6 +53,18 @@ repository = "datatypes"
 registry = "https://your.registry.com/"
 ```
 
-### Going further
+### 4. Install Dependencies
 
-For more details on using Buffrs, check out the [Buffrs Guide](../guide/index.md)
+Download and set up dependencies:
+
+```bash
+buffrs install
+```
+
+Dependencies are placed in `proto/vendor/` and ready to import.
+
+### What's Next?
+
+- **[Buffrs Guide](../guide/index.md)**: Learn core concepts and workflows
+- **[Commands Reference](../commands/index.md)**: Explore all CLI commands
+- **[Package Types](../guide/package-types.md)**: Understand APIs vs libraries
