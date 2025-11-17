@@ -116,7 +116,11 @@ impl Serialize for RegistryRef {
     where
         S: serde::Serializer,
     {
-        self.to_string().serialize(serializer)
+        match self {
+            RegistryRef::ResolvedAlias { url, .. } => url.serialize(serializer),
+            RegistryRef::Url(url) => url.serialize(serializer),
+            RegistryRef::Alias(alias) => alias.serialize(serializer),
+        }
     }
 }
 
