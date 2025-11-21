@@ -26,3 +26,13 @@ skip-tree = [
 
 [advisories]
 version = 2
+ignore = [
+    # serde_yml and its dependencies (libyml, yaml-rust2) are unmaintained
+    # but we use them for YAML serialization. There are no maintained pure Rust
+    # alternatives with the features we need.
+    # See: https://github.com/rustsec/advisory-db/issues/2395
+    "RUSTSEC-2025-0021",  # yaml-rust2 unmaintained
+    "RUSTSEC-2025-0067",  # libyml unmaintained
+    "RUSTSEC-2024-0436",  # unsafe-libyaml unmaintained
+    "RUSTSEC-2025-0068",  # serde_yml unmaintained
+]
