@@ -92,7 +92,6 @@ impl Artifactory {
             .send()
             .await
             .map(|_| ())
-            .map_err(miette::Report::from)
     }
 
     /// Retrieves the latest version of a package by querying artifactory. Returns an error if no artifact could be found
@@ -105,7 +104,7 @@ impl Artifactory {
         let search_query_url: Url = {
             let mut uri: url::Url = self.registry.to_owned().into();
             uri.set_path("artifactory/api/search/artifact");
-            uri.set_query(Some(&format!("name={}&repos={}", name, repository)));
+            uri.set_query(Some(&format!("name={name}&repos={repository}")));
             uri
         };
 
@@ -149,16 +148,16 @@ impl Artifactory {
                 let uri = artifact_search_result.to_owned().uri;
                 let full_artifact_name = uri
                     .split('/')
-                    .last()
+                    .next_back()
                     .map(|name_tgz| name_tgz.trim_end_matches(".tgz"));
                 let artifact_version = full_artifact_name
-                    .and_then(|name| name.split('-').last())
+                    .and_then(|name| name.split('-').next_back())
                     .and_then(|version_str| Version::parse(version_str).ok());
 
                 // we double check that the artifact name matches exactly
                 let expected_artifact_name = artifact_version
                     .clone()
-                    .map(|av| format!("{}-{}", name, av));
+                    .map(|av| format!("{name}-{av}"));
                 if full_artifact_name.is_some_and(|actual| {
                     expected_artifact_name.is_some_and(|expected| expected == actual)
                 }) {

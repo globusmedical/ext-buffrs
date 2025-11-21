@@ -174,7 +174,7 @@ impl Lockfile {
     }
 
     /// Persists a Lockfile to the filesystem
-    /// 
+    ///
     /// Only writes the file if the content has changed to avoid
     /// unnecessary timestamp updates that trigger rebuild cascades.
     pub async fn write(&self) -> miette::Result<()> {

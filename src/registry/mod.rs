@@ -156,9 +156,9 @@ impl TryFrom<&RegistryRef> for RegistryUri {
 impl Display for RegistryRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RegistryRef::Url(url) => write!(f, "{}", url),
-            RegistryRef::Alias(alias) => write!(f, "{}", alias),
-            RegistryRef::ResolvedAlias { alias, url } => write!(f, "{} ({})", alias, url),
+            RegistryRef::Url(url) => write!(f, "{url}"),
+            RegistryRef::Alias(alias) => write!(f, "{alias}"),
+            RegistryRef::ResolvedAlias { alias, url } => write!(f, "{alias} ({url})"),
         }
     }
 }

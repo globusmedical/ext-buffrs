@@ -206,8 +206,7 @@ pub async fn add(
                 .await?;
             // Convert semver::Version to semver::VersionReq. It will default to operator `>`, which is what we want for Proto.toml
             VersionReq::parse(&latest_version.to_string())
-                .into_diagnostic()
-                .map_err(miette::Report::from)?
+                .into_diagnostic()?
         }
     };
 
@@ -543,7 +542,7 @@ pub async fn list(config: &Config) -> miette::Result<()> {
             .wrap_err(miette!("failed to transform protobuf path"))?
             .to_posix_string();
 
-        print!("{} ", rel)
+        print!("{rel} ")
     }
 
     Ok(())
