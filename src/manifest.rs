@@ -478,7 +478,7 @@ impl PublishableManifest for Manifest {
     }
 
     fn file_name() -> String {
-        format!("{}.orig", MANIFEST_FILE)
+        format!("{MANIFEST_FILE}.orig")
     }
 }
 

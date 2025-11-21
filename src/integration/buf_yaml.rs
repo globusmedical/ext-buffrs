@@ -141,7 +141,7 @@ pub fn generate_buf_yaml_file(
                     continue;
                 }
 
-                if path.extension().map_or(false, |ext| ext == "proto") {
+                if path.extension().is_some_and(|ext| ext == "proto") {
                     has_protos = true;
                     break;
                 }

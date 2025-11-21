@@ -5,7 +5,7 @@ on:
     branches:
       - main
       - main-gm
-  pull_request:
+  # pull_request:  # Disabled - Nix checks are slow and often timeout
   workflow_dispatch:
 
 jobs:

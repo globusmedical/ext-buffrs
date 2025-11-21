@@ -174,6 +174,9 @@ impl Lockfile {
     }
 
     /// Persists a Lockfile to the filesystem
+    ///
+    /// Only writes the file if the content has changed to avoid
+    /// unnecessary timestamp updates that trigger rebuild cascades.
     pub async fn write(&self) -> miette::Result<()> {
         let mut packages: Vec<_> = self
             .packages
@@ -192,16 +195,23 @@ impl Lockfile {
             packages,
         };
 
-        fs::write(
-            LOCKFILE,
-            toml::to_string(&raw)
-                .into_diagnostic()
-                .wrap_err(SerializationError(ManagedFile::Lock))?
-                .into_bytes(),
-        )
-        .await
-        .into_diagnostic()
-        .wrap_err(WriteError(LOCKFILE))
+        let new_content = toml::to_string(&raw)
+            .into_diagnostic()
+            .wrap_err(SerializationError(ManagedFile::Lock))?;
+
+        // Check if file exists and content is unchanged
+        if let Ok(existing_content) = fs::read_to_string(LOCKFILE).await {
+            if existing_content == new_content {
+                // Content unchanged - skip write to preserve timestamp
+                return Ok(());
+            }
+        }
+
+        // Content changed or file doesn't exist - write it
+        fs::write(LOCKFILE, new_content.into_bytes())
+            .await
+            .into_diagnostic()
+            .wrap_err(WriteError(LOCKFILE))
     }
 
     /// Locates a given package in the Lockfile

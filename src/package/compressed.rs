@@ -200,6 +200,7 @@ impl Package {
             })
             .ok_or_else(|| miette!("missing manifest"))?;
 
+        #[allow(clippy::unbuffered_bytes)]
         let manifest = manifest
             .bytes()
             .collect::<io::Result<Vec<_>>>()
