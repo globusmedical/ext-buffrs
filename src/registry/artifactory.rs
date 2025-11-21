@@ -155,9 +155,8 @@ impl Artifactory {
                     .and_then(|version_str| Version::parse(version_str).ok());
 
                 // we double check that the artifact name matches exactly
-                let expected_artifact_name = artifact_version
-                    .clone()
-                    .map(|av| format!("{name}-{av}"));
+                let expected_artifact_name =
+                    artifact_version.clone().map(|av| format!("{name}-{av}"));
                 if full_artifact_name.is_some_and(|actual| {
                     expected_artifact_name.is_some_and(|expected| expected == actual)
                 }) {
