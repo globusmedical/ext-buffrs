@@ -17,17 +17,18 @@ use crate::{
     config::Config,
     credentials::Credentials,
     integration::{buf_yaml, path_util::PathUtil},
-    lock::{LockedPackage, Lockfile},
+    lock::{LockedDependency, LockedPackage, Lockfile},
     manifest::{Dependency, Manifest, PackageManifest, MANIFEST_FILE},
     package::{Package, PackageName, PackageStore, PackageType},
     registry::{Artifactory, CertValidationPolicy, RegistryRef, RegistryUri},
-    resolver::{DependencyGraph, DependencyGraphBuilder, ResolvedDependency},
+    resolver::{DependencyGraph, DependencyGraphBuilder, ResolvedDependency, ResolvedPackageId},
 };
 
 use async_recursion::async_recursion;
 use miette::{bail, ensure, miette, Context, IntoDiagnostic};
 use semver::{Version, VersionReq};
 use std::{
+    collections::HashMap,
     env,
     path::{Path, PathBuf},
     str::FromStr,
@@ -345,8 +346,9 @@ pub async fn publish(
     }
 
     #[cfg(feature = "git")]
-    if let Ok(statuses) = git_statuses().await {
-        if !allow_dirty && !statuses.is_empty() {
+    if env::var(BUFFRS_TESTSUITE_VAR).is_err() {
+        if let Ok(statuses) = git_statuses().await {
+            if !allow_dirty && !statuses.is_empty() {
             tracing::error!("{} files in the working directory contain changes that were not yet committed into git:\n", statuses.len());
 
             statuses.iter().for_each(|s| tracing::error!("{}", s));
@@ -354,6 +356,7 @@ pub async fn publish(
             tracing::error!("\nTo proceed with publishing despite the uncommitted changes, pass the `--allow-dirty` flag\n");
 
             bail!("attempted to publish a dirty repository");
+            }
         }
     }
 
@@ -405,9 +408,17 @@ pub async fn install(
 
     store.clear().await?;
 
+    // Track whether we installed the local package itself (InstallMode::All)
+    let mut installed_local: Option<(ResolvedPackageId, PathBuf)> = None;
+
     if let InstallMode::All = mode {
         if let Some(ref pkg) = manifest.package {
             store.populate(pkg).await?;
+
+            installed_local = Some((
+                ResolvedPackageId::new(pkg.name.clone(), pkg.version.clone()),
+                store.locate(&pkg.name),
+            ));
 
             tracing::info!(":: installed {}@{}", pkg.name, pkg.version);
         }
@@ -423,25 +434,25 @@ pub async fn install(
 
     #[async_recursion]
     async fn traverse_and_install(
-        name: &PackageName,
+        id: &ResolvedPackageId,
         graph: &DependencyGraph,
         store: &PackageStore,
         locked: &mut Vec<LockedPackage>,
         prefix: String,
     ) -> miette::Result<()> {
-        let resolved = graph.get(name).ok_or(miette!(
+        let resolved = graph.get(id).ok_or(miette!(
             "unexpected error: missing dependency in dependency graph"
         ))?;
 
-        store.unpack(resolved.package()).await.wrap_err(miette!(
-            "failed to unpack package {}",
-            &resolved.package().name()
-        ))?;
+        store
+            .unpack_resolved(resolved.package(), id, graph.allow_multiple_versions())
+            .await
+            .wrap_err(miette!("failed to unpack package {}", &resolved.package().name()))?;
 
         tracing::info!(
             "{} installed {}@{}",
             if prefix.is_empty() { "::" } else { &prefix },
-            name,
+            resolved.package().name(),
             resolved.package().version()
         );
 
@@ -453,7 +464,20 @@ pub async fn install(
             ..
         } = &resolved
         {
-            locked.push(package.lock(registry.clone(), repository.clone(), dependants.len()));
+            let resolved_deps: Vec<LockedDependency> = resolved
+                .depends_on()
+                .iter()
+                .map(|dep| LockedDependency {
+                    name: dep.name().clone(),
+                    version: dep.version().clone(),
+                })
+                .collect();
+
+            locked.push(
+                package
+                    .lock(registry.clone(), repository.clone(), dependants.len())
+                    .with_resolved_dependencies(resolved_deps),
+            );
         }
 
         for (index, dependency) in resolved.depends_on().iter().enumerate() {
@@ -474,16 +498,163 @@ pub async fn install(
         Ok(())
     }
 
-    for dependency in &manifest.dependencies {
-        traverse_and_install(
-            &dependency.package,
-            &dependency_graph,
-            &store,
-            &mut locked,
-            String::new(),
-        )
-        .await?;
+    for dependency in dependency_graph.roots() {
+        traverse_and_install(dependency, &dependency_graph, &store, &mut locked, String::new())
+            .await?;
     }
+
+    async fn extract_proto_package_statement(contents: &str) -> Option<String> {
+        // Strip comments (// and /* */) while keeping a simple character stream.
+        let mut out = String::with_capacity(contents.len());
+        let mut chars = contents.chars().peekable();
+        let mut in_block = false;
+
+        while let Some(c) = chars.next() {
+            if in_block {
+                if c == '*' {
+                    if let Some('/') = chars.peek().copied() {
+                        chars.next();
+                        in_block = false;
+                    }
+                }
+                continue;
+            }
+
+            if c == '/' {
+                match chars.peek().copied() {
+                    Some('/') => {
+                        // line comment
+                        while let Some(nc) = chars.next() {
+                            if nc == '\n' {
+                                out.push('\n');
+                                break;
+                            }
+                        }
+                        continue;
+                    }
+                    Some('*') => {
+                        chars.next();
+                        in_block = true;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+
+            out.push(c);
+        }
+
+        // Find first `package ...;` statement.
+        let bytes = out.as_bytes();
+        let mut i = 0;
+        while i + 7 <= bytes.len() {
+            // look for "package" keyword
+            if &bytes[i..i + 7] == b"package" {
+                let prev_ok = i == 0
+                    || !matches!(bytes[i - 1], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
+                let next_ok = i + 7 == bytes.len()
+                    || matches!(bytes[i + 7], b' ' | b'\t' | b'\r' | b'\n');
+                if prev_ok && next_ok {
+                    let mut j = i + 7;
+                    while j < bytes.len() && matches!(bytes[j], b' ' | b'\t' | b'\r' | b'\n') {
+                        j += 1;
+                    }
+                    let start = j;
+                    while j < bytes.len()
+                        && matches!(
+                            bytes[j],
+                            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.'
+                        )
+                    {
+                        j += 1;
+                    }
+                    if start == j {
+                        return None;
+                    }
+                    while j < bytes.len() && matches!(bytes[j], b' ' | b'\t' | b'\r' | b'\n') {
+                        j += 1;
+                    }
+                    if j < bytes.len() && bytes[j] == b';' {
+                        let pkg = String::from_utf8_lossy(&bytes[start..j]).trim().to_string();
+                        return Some(pkg);
+                    }
+                }
+            }
+
+            i += 1;
+        }
+
+        None
+    }
+
+    async fn ensure_multi_version_link_safety(
+        graph: &DependencyGraph,
+        store: &PackageStore,
+        installed_local: &Option<(ResolvedPackageId, PathBuf)>,
+        config: &Config,
+    ) -> miette::Result<()> {
+        if !graph.allow_multiple_versions() {
+            return Ok(());
+        }
+
+        if config.skip_link_safety_check() {
+            tracing::warn!(
+                ":: WARNING: skip_link_safety_check is enabled; proto namespace collisions are NOT being checked"
+            );
+            return Ok(());
+        }
+
+        // protobuf package -> (resolved id, example file)
+        let mut seen: HashMap<String, (ResolvedPackageId, PathBuf)> = HashMap::new();
+
+        let mut modules: Vec<(ResolvedPackageId, PathBuf)> = graph
+            .keys()
+            .cloned()
+            .map(|id| {
+                let path = store.locate_resolved(&id, graph.allow_multiple_versions());
+                (id, path)
+            })
+            .collect();
+
+        if let Some((id, path)) = installed_local {
+            modules.push((id.clone(), path.clone()));
+        }
+
+        // Deterministic order for errors.
+        modules.sort_by(|(a, _), (b, _)| a.to_string().cmp(&b.to_string()));
+
+        for (id, module_root) in modules {
+            for proto in store.collect(&module_root, true).await {
+                let contents = tokio::fs::read_to_string(&proto)
+                    .await
+                    .into_diagnostic()
+                    .wrap_err(miette!("failed to read proto file {}", proto.display()))?;
+
+                let pkg = extract_proto_package_statement(&contents)
+                    .await
+                    .unwrap_or_else(|| "<no package>".into());
+
+                if let Some((other_id, other_file)) = seen.get(&pkg) {
+                    if other_id != &id {
+                        bail!(miette!(
+                            "multi-version install is not link-safe: protobuf package namespace '{}' is declared by both {} (e.g. {}) and {} (e.g. {})",
+                            pkg,
+                            other_id,
+                            other_file.display(),
+                            id,
+                            proto.display()
+                        ));
+                    }
+                } else {
+                    seen.insert(pkg, (id.clone(), proto.clone()));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    ensure_multi_version_link_safety(&dependency_graph, &store, &installed_local, config).await?;
 
     for option in generation {
         match option {

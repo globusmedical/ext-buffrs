@@ -12,10 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
 use miette::{ensure, Context, IntoDiagnostic};
-use semver::Version;
+use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::fs;
@@ -52,10 +50,24 @@ pub struct LockedPackage {
     pub version: Version,
     /// Names of dependency packages
     pub dependencies: Vec<PackageName>,
+
+    /// Resolved dependency packages with exact versions.
+    ///
+    /// This is optional and primarily used to disambiguate dependency graphs when multiple
+    /// versions of the same package name are installed side-by-side.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies_resolved: Vec<LockedDependency>,
     /// Count of dependant packages in the current graph
     ///
     /// This is used to detect when an entry can be safely removed from the lockfile.
     pub dependants: usize,
+}
+
+/// A resolved dependency reference stored in the lockfile.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LockedDependency {
+    pub name: PackageName,
+    pub version: Version,
 }
 
 impl LockedPackage {
@@ -78,8 +90,15 @@ impl LockedPackage {
                 .iter()
                 .map(|d| d.package.clone())
                 .collect(),
+            dependencies_resolved: Vec::new(),
             dependants,
         }
+    }
+
+    /// Attach resolved dependency versions (optional).
+    pub fn with_resolved_dependencies(mut self, dependencies: Vec<LockedDependency>) -> Self {
+        self.dependencies_resolved = dependencies;
+        self
     }
 
     /// Validates if another LockedPackage matches this one
@@ -136,7 +155,7 @@ struct RawLockfile {
 /// Used to ensure future installations will deterministically select the exact same packages.
 #[derive(Default)]
 pub struct Lockfile {
-    packages: HashMap<PackageName, LockedPackage>,
+    packages: Vec<LockedPackage>,
 }
 
 impl Lockfile {
@@ -180,10 +199,11 @@ impl Lockfile {
     pub async fn write(&self) -> miette::Result<()> {
         let mut packages: Vec<_> = self
             .packages
-            .values()
+            .iter()
             .map(|pkg| {
                 let mut locked = pkg.clone();
                 locked.dependencies.sort();
+                locked.dependencies_resolved.sort();
                 locked
             })
             .collect();
@@ -216,17 +236,45 @@ impl Lockfile {
 
     /// Locates a given package in the Lockfile
     pub fn get(&self, name: &PackageName) -> Option<&LockedPackage> {
-        self.packages.get(name)
+        self.packages.iter().find(|p| &p.name == name)
+    }
+
+    /// Locates a given package in the lockfile by name and version requirement.
+    ///
+    /// This is required when multiple versions of the same package name are present.
+    pub fn find(
+        &self,
+        name: &PackageName,
+        version_req: &VersionReq,
+        registry: Option<&RegistryRef>,
+        repository: Option<&str>,
+    ) -> Option<&LockedPackage> {
+        self.packages.iter().find(|p| {
+            if &p.name != name {
+                return false;
+            }
+            if !version_req.matches(&p.version) {
+                return false;
+            }
+            if let Some(registry) = registry {
+                if &p.registry != registry {
+                    return false;
+                }
+            }
+            if let Some(repository) = repository {
+                if p.repository != repository {
+                    return false;
+                }
+            }
+            true
+        })
     }
 }
 
 impl FromIterator<LockedPackage> for Lockfile {
     fn from_iter<I: IntoIterator<Item = LockedPackage>>(iter: I) -> Self {
         Self {
-            packages: iter
-                .into_iter()
-                .map(|locked| (locked.name.clone(), locked))
-                .collect(),
+            packages: iter.into_iter().collect(),
         }
     }
 }
@@ -236,7 +284,7 @@ impl TryFrom<Lockfile> for Vec<FileRequirement> {
 
     fn try_from(lock: Lockfile) -> miette::Result<Self> {
         lock.packages
-            .values()
+            .into_iter()
             .map(FileRequirement::try_from)
             .collect()
     }

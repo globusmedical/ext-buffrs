@@ -120,13 +120,7 @@ pub fn generate_buf_yaml_file(
         BufYamlFile::new(store)?
     };
 
-    let mut vendor_modules: Vec<String> = dependency_graph
-        .get_package_names()
-        .iter()
-        .map(|p| p.to_string())
-        .collect();
-
-    vendor_modules.sort();
+    let vendor_modules: Vec<String> = dependency_graph.vendor_module_names();
     buf_yaml.clear_modules();
 
     if manifest.package.is_some() {

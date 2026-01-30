@@ -19,7 +19,7 @@ use std::{
 };
 
 use crate::{
-    manifest::{Edition, CANARY_EDITION},
+    manifest::{Edition, CANARY_EDITION, MANIFEST_FILE},
     registry::{RegistryRef, RegistryUri},
 };
 
@@ -65,6 +65,15 @@ pub struct Config {
 
     /// Default arguments for commands
     command_defaults: HashMap<String, Vec<String>>,
+
+    /// Resolver-related settings
+    resolver: ResolverConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolverConfig {
+    allow_multiple_versions: bool,
+    skip_link_safety_check: bool,
 }
 
 impl Config {
@@ -81,8 +90,27 @@ impl Config {
                 default_registry: None,
                 registries: HashMap::new(),
                 command_defaults: HashMap::new(),
+                resolver: ResolverConfig {
+                    allow_multiple_versions: false,
+                    skip_link_safety_check: false,
+                },
             }),
         }
+    }
+
+    /// Whether dependency resolution may install multiple versions of the same package name.
+    ///
+    /// This is opt-in because it can change vendor layout and lockfile behavior.
+    pub fn allow_multiple_versions(&self) -> bool {
+        self.resolver.allow_multiple_versions
+    }
+
+    /// Skip the link-safety check that detects proto namespace collisions.
+    ///
+    /// WARNING: This is unsafe and should ONLY be used for testing or when you know
+    /// that the proto namespaces don't actually conflict at runtime.
+    pub fn skip_link_safety_check(&self) -> bool {
+        self.resolver.skip_link_safety_check
     }
 
     /// Parse a registry argument
@@ -156,6 +184,14 @@ impl Config {
                     return Some(config_path);
                 }
 
+                // Stop searching above the nearest Proto.toml.
+                //
+                // This prevents accidental pickup of unrelated parent configs (e.g. from a user's
+                // home directory) and keeps config scoped to the current buffrs project tree.
+                if current_dir.join(MANIFEST_FILE).exists() {
+                    break;
+                }
+
                 if !current_dir.pop() {
                     break;
                 }
@@ -190,7 +226,11 @@ impl Config {
         // Locate default registry from [registry.default]
         let default_registry = Self::get_default_registry(&config, &registries)?;
 
+        // Parse resolver settings
+        let resolver = Self::get_resolver_config(&config);
+
         // Parse command-specific default arguments from [commands.*] sections
+        // (takes ownership of config)
         let command_defaults = Self::get_command_defaults(config, config_path)?;
 
         Ok(Self {
@@ -199,7 +239,27 @@ impl Config {
             default_registry,
             registries,
             command_defaults,
+            resolver,
         })
+    }
+
+    fn get_resolver_config(config: &toml::Value) -> ResolverConfig {
+        let allow_multiple_versions = config
+            .get("resolver")
+            .and_then(|resolver| resolver.get("allow_multiple_versions"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+
+        let skip_link_safety_check = config
+            .get("resolver")
+            .and_then(|resolver| resolver.get("skip_link_safety_check"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+
+        ResolverConfig {
+            allow_multiple_versions,
+            skip_link_safety_check,
+        }
     }
 
     fn parse_config(config_path: &Path) -> Result<toml::Value, miette::Error> {
@@ -349,6 +409,9 @@ default_args = ["--insecure"]
 
 [commands.install]
 default_args = ["--generate-buf-yaml", "--generate-tonic-proto-module", "src/proto.rs"]
+
+[resolver]
+allow_multiple_versions = true
 "#,
         )
         .unwrap();
@@ -372,5 +435,7 @@ default_args = ["--generate-buf-yaml", "--generate-tonic-proto-module", "src/pro
             config.command_defaults.get(DEFAULT_ARGS_KEY).unwrap(),
             &vec!["--insecure".to_string()]
         );
+
+        assert_eq!(config.allow_multiple_versions(), true);
     }
 }
