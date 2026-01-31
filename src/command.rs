@@ -433,6 +433,7 @@ pub async fn install(
             .wrap_err(miette!("dependency resolution failed"))?;
 
     let mut locked = Vec::new();
+    let mut visited = std::collections::HashSet::new();
 
     #[async_recursion]
     async fn traverse_and_install(
@@ -440,8 +441,14 @@ pub async fn install(
         graph: &DependencyGraph,
         store: &PackageStore,
         locked: &mut Vec<LockedPackage>,
+        visited: &mut std::collections::HashSet<ResolvedPackageId>,
         prefix: String,
     ) -> miette::Result<()> {
+        // Skip if already visited (avoids duplicates in diamond dependencies)
+        if !visited.insert(id.clone()) {
+            return Ok(());
+        }
+
         let resolved = graph.get(id).ok_or(miette!(
             "unexpected error: missing dependency in dependency graph"
         ))?;
@@ -494,16 +501,52 @@ pub async fn install(
                 if prefix.is_empty() { "  " } else { &prefix }
             );
 
-            traverse_and_install(dependency, graph, store, locked, new_prefix).await?;
+            traverse_and_install(dependency, graph, store, locked, visited, new_prefix).await?;
         }
 
         Ok(())
     }
 
     for dependency in dependency_graph.roots() {
-        traverse_and_install(dependency, &dependency_graph, &store, &mut locked, String::new())
+        traverse_and_install(dependency, &dependency_graph, &store, &mut locked, &mut visited, String::new())
             .await?;
     }
+
+    /// Validates config orthogonality (DR-BUFFRS-1420).
+    ///
+    /// Warns if the lockfile has multiversion packages but the manifest no longer
+    /// grants multiversion permission for them.
+    fn check_config_orthogonality(
+        manifest: &Manifest,
+        lockfile: &Lockfile,
+    ) {
+        let lock_state = lockfile.multiversion_state();
+        if !lock_state.has_multiversion() {
+            return;
+        }
+
+        // Build set of packages that manifest allows multiversion for
+        let manifest_multiversion: std::collections::HashSet<PackageName> = manifest
+            .dependencies
+            .iter()
+            .filter(|dep| dep.allows_multiversion())
+            .map(|dep| dep.package.clone())
+            .collect();
+
+        for pkg_name in &lock_state.multiversion_packages {
+            if !manifest_multiversion.contains(pkg_name) {
+                tracing::warn!(
+                    ":: WARNING: lockfile has multiple versions of '{}' but manifest does not grant multiversion permission",
+                    pkg_name
+                );
+                tracing::warn!(
+                    "   Consider adding `resolver = \"multiversion\"` to the dependency, or deleting Proto.lock to re-resolve"
+                );
+            }
+        }
+    }
+
+    check_config_orthogonality(&manifest, &lockfile);
 
     async fn ensure_multi_version_link_safety(
         graph: &DependencyGraph,
@@ -511,7 +554,11 @@ pub async fn install(
         installed_local: &Option<(ResolvedPackageId, PathBuf)>,
         config: &Config,
     ) -> miette::Result<()> {
-        if !graph.allow_multiple_versions() {
+        // Check if any multiversion is in play (global flag or per-dependency)
+        let has_multiversion = graph.allow_multiple_versions()
+            || !graph.multiversion_permitted.is_empty();
+
+        if !has_multiversion {
             return Ok(());
         }
 
@@ -522,8 +569,10 @@ pub async fn install(
             return Ok(());
         }
 
-        // protobuf package -> (resolved id, example file)
-        let mut seen: HashMap<String, (ResolvedPackageId, PathBuf)> = HashMap::new();
+        use crate::manifest::NamespaceOverlapPolicy;
+
+        // protobuf namespace -> (resolved id, file path, content hash)
+        let mut seen: HashMap<String, (ResolvedPackageId, PathBuf, String)> = HashMap::new();
 
         let mut modules: Vec<(ResolvedPackageId, PathBuf)> = graph
             .keys()
@@ -551,19 +600,71 @@ pub async fn install(
                 let pkg = namespace_scan::extract_proto_package(&contents)
                     .unwrap_or_else(|| "<no package>".into());
 
-                if let Some((other_id, other_file)) = seen.get(&pkg) {
+                let content_hash = namespace_scan::content_hash(&contents);
+
+                if let Some((other_id, other_file, other_hash)) = seen.get(&pkg) {
                     if other_id != &id {
-                        bail!(miette!(
-                            "multi-version install is not link-safe: protobuf package namespace '{}' is declared by both {} (e.g. {}) and {} (e.g. {})",
-                            pkg,
-                            other_id,
-                            other_file.display(),
-                            id,
-                            proto.display()
-                        ));
+                        // Namespace collision detected - check policies
+                        let policy = graph.namespace_policy(id.name());
+                        let other_policy = graph.namespace_policy(other_id.name());
+
+                        // Use the most permissive policy between the two
+                        let effective_policy = match (&policy, &other_policy) {
+                            (NamespaceOverlapPolicy::Allowed, _)
+                            | (_, NamespaceOverlapPolicy::Allowed) => {
+                                NamespaceOverlapPolicy::Allowed
+                            }
+                            (NamespaceOverlapPolicy::IdenticalOnly, _)
+                            | (_, NamespaceOverlapPolicy::IdenticalOnly) => {
+                                NamespaceOverlapPolicy::IdenticalOnly
+                            }
+                            _ => NamespaceOverlapPolicy::Forbidden,
+                        };
+
+                        match effective_policy {
+                            NamespaceOverlapPolicy::Allowed => {
+                                tracing::warn!(
+                                    ":: namespace overlap allowed: '{}' declared by {} and {}",
+                                    pkg, other_id, id
+                                );
+                            }
+                            NamespaceOverlapPolicy::IdenticalOnly => {
+                                // DR-BUFFRS-1520: Check content identity
+                                if &content_hash != other_hash {
+                                    bail!(miette!(
+                                        "multi-version install is not link-safe: protobuf namespace '{}' has different content\n\
+                                         - {} (e.g. {}) hash: {}...\n\
+                                         - {} (e.g. {}) hash: {}...\n\
+                                         \n\
+                                         The `identical_only` policy requires identical proto file contents.\n\
+                                         Use `namespace_overlap = \"allowed\"` to override (dangerous).",
+                                        pkg,
+                                        other_id, other_file.display(), &other_hash[..16],
+                                        id, proto.display(), &content_hash[..16]
+                                    ));
+                                }
+                                tracing::info!(
+                                    ":: namespace overlap identical: '{}' in {} and {} (content matches)",
+                                    pkg, other_id, id
+                                );
+                            }
+                            NamespaceOverlapPolicy::Forbidden => {
+                                bail!(miette!(
+                                    "multi-version install is not link-safe: protobuf package namespace '{}' is declared by both {} (e.g. {}) and {} (e.g. {})\n\
+                                     \n\
+                                     Options:\n\
+                                     - Add `namespace_overlap = \"identical_only\"` if content is the same\n\
+                                     - Add `namespace_overlap = \"allowed\"` to override (dangerous)\n\
+                                     - Restructure dependencies to avoid the collision",
+                                    pkg,
+                                    other_id, other_file.display(),
+                                    id, proto.display()
+                                ));
+                            }
+                        }
                     }
                 } else {
-                    seen.insert(pkg, (id.clone(), proto.clone()));
+                    seen.insert(pkg, (id.clone(), proto.clone(), content_hash));
                 }
             }
         }

@@ -136,10 +136,17 @@ pub struct NamespaceOwner {
 }
 
 /// Emits metadata files to the `_buffrs_meta/` directory.
+///
+/// Only creates metadata if there are packages in the graph.
 pub async fn emit_metadata(
     graph: &DependencyGraph,
     vendor_root: &Path,
 ) -> miette::Result<()> {
+    // Skip metadata emission if graph is empty
+    if graph.is_empty() {
+        return Ok(());
+    }
+
     let meta_dir = vendor_root.join(METADATA_DIR);
 
     // Create metadata directory
@@ -178,7 +185,7 @@ pub async fn emit_metadata(
         .into_diagnostic()
         .map_err(|e| miette!("failed to write {}: {}", BUFFRS_CMAKE, e))?;
 
-    tracing::info!(":: emitted metadata to {}", meta_dir.display());
+    tracing::debug!(":: emitted metadata to {}", meta_dir.display());
 
     Ok(())
 }
@@ -257,7 +264,7 @@ fn build_namespaces_metadata(namespace_scan: &NamespaceScanResult) -> Namespaces
     for (ns, owners) in &namespace_scan.namespace_to_packages {
         let entries: Vec<NamespaceOwner> = owners
             .iter()
-            .map(|(name, version, file)| NamespaceOwner {
+            .map(|(name, version, file, _content_hash)| NamespaceOwner {
                 name: name.to_string(),
                 version: version.to_string(),
                 source_file: file.clone(),

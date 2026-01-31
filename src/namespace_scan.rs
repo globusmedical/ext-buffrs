@@ -22,17 +22,19 @@
 //!    of the same package are installed.
 //! 2. Metadata emission: Generating `namespaces.json` for CMake integration to
 //!    validate link-unit safety at build time.
+//! 3. Content identity: Computing content hashes for `identical_only` policy support.
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use miette::{miette, IntoDiagnostic};
 use semver::Version;
+use sha2::{Digest as Sha2Digest, Sha256};
 use tokio::fs;
 use walkdir::WalkDir;
 
 use crate::package::PackageName;
-use crate::resolver::{DependencyGraph, ResolvedPackageId};
+use crate::resolver::DependencyGraph;
 
 /// Information about a protobuf namespace declaration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +43,8 @@ pub struct NamespaceInfo {
     pub namespace: String,
     /// The file containing this declaration
     pub source_file: String,
+    /// SHA-256 hash of the file content (hex-encoded)
+    pub content_hash: String,
 }
 
 /// Information about a package's namespace declarations.
@@ -57,16 +61,17 @@ pub struct PackageNamespaces {
 /// Result of scanning the vendor directory for namespaces.
 #[derive(Debug, Clone, Default)]
 pub struct NamespaceScanResult {
-    /// Mapping from namespace to list of packages declaring it.
+    /// Mapping from namespace to list of packages declaring it with content hash.
+    /// Tuple is (package_name, version, source_file, content_hash).
     /// If a namespace maps to multiple packages, there's a potential conflict.
-    pub namespace_to_packages: HashMap<String, Vec<(PackageName, Version, String)>>,
+    pub namespace_to_packages: HashMap<String, Vec<(PackageName, Version, String, String)>>,
     /// All packages with their namespace declarations.
     pub packages: Vec<PackageNamespaces>,
 }
 
 impl NamespaceScanResult {
     /// Returns namespaces that are declared by more than one package@version.
-    pub fn conflicts(&self) -> Vec<(&String, &[(PackageName, Version, String)])> {
+    pub fn conflicts(&self) -> Vec<(&String, &[(PackageName, Version, String, String)])> {
         self.namespace_to_packages
             .iter()
             .filter(|(_, pkgs)| {
@@ -75,11 +80,35 @@ impl NamespaceScanResult {
                     return false;
                 }
                 let first = (&pkgs[0].0, &pkgs[0].1);
-                pkgs.iter().any(|(n, v, _)| (n, v) != first)
+                pkgs.iter().any(|(n, v, _, _)| (n, v) != first)
             })
             .map(|(ns, pkgs)| (ns, pkgs.as_slice()))
             .collect()
     }
+
+    /// Returns namespaces where different versions have non-identical content.
+    /// This is used for `identical_only` policy validation.
+    pub fn content_conflicts(&self) -> Vec<(&String, &[(PackageName, Version, String, String)])> {
+        self.namespace_to_packages
+            .iter()
+            .filter(|(_, pkgs)| {
+                if pkgs.len() <= 1 {
+                    return false;
+                }
+                // Check if there are different content hashes
+                let first_hash = &pkgs[0].3;
+                pkgs.iter().any(|(_, _, _, hash)| hash != first_hash)
+            })
+            .map(|(ns, pkgs)| (ns, pkgs.as_slice()))
+            .collect()
+    }
+}
+
+/// Compute SHA-256 hash of content (hex-encoded).
+pub fn content_hash(content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 /// Extracts the protobuf `package` statement from file contents.
@@ -192,6 +221,7 @@ pub async fn scan_directory(dir: &Path) -> miette::Result<Vec<NamespaceInfo>> {
                     .unwrap_or(path)
                     .to_string_lossy()
                     .to_string(),
+                content_hash: content_hash(&contents),
             });
         }
     }
@@ -237,6 +267,7 @@ pub async fn scan_dependency_graph(
                     id.name().clone(),
                     id.version().clone(),
                     ns_info.source_file.clone(),
+                    ns_info.content_hash.clone(),
                 ));
         }
 

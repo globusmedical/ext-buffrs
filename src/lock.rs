@@ -158,6 +158,20 @@ pub struct Lockfile {
     packages: Vec<LockedPackage>,
 }
 
+/// Information about multiversion state in a lockfile.
+#[derive(Debug, Clone, Default)]
+pub struct LockfileMultiversionState {
+    /// Package names that have multiple versions locked.
+    pub multiversion_packages: std::collections::HashSet<PackageName>,
+}
+
+impl LockfileMultiversionState {
+    /// Returns true if any package has multiple versions.
+    pub fn has_multiversion(&self) -> bool {
+        !self.multiversion_packages.is_empty()
+    }
+}
+
 impl Lockfile {
     /// Checks if the Lockfile currently exists in the filesystem
     pub async fn exists() -> miette::Result<bool> {
@@ -237,6 +251,24 @@ impl Lockfile {
     /// Locates a given package in the Lockfile
     pub fn get(&self, name: &PackageName) -> Option<&LockedPackage> {
         self.packages.iter().find(|p| &p.name == name)
+    }
+
+    /// Computes the multiversion state of this lockfile.
+    ///
+    /// Returns information about which packages have multiple versions locked.
+    pub fn multiversion_state(&self) -> LockfileMultiversionState {
+        use std::collections::HashMap;
+        let mut version_counts: HashMap<&PackageName, usize> = HashMap::new();
+        for pkg in &self.packages {
+            *version_counts.entry(&pkg.name).or_default() += 1;
+        }
+        LockfileMultiversionState {
+            multiversion_packages: version_counts
+                .into_iter()
+                .filter(|(_, count)| *count > 1)
+                .map(|(name, _)| name.clone())
+                .collect(),
+        }
     }
 
     /// Locates a given package in the lockfile by name and version requirement.
