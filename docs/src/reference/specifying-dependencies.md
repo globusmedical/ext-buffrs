@@ -1,4 +1,5 @@
 # Specifying Dependencies
+
 This page covers how to specify dependencies in your `Proto.toml` manifest file.
 
 ## Basic Syntax
@@ -23,13 +24,13 @@ repository = "common"
 
 Buffrs supports several version requirement formats:
 
-| Format | Example | Description |
-|--------|---------|-------------|
-| Exact | `=1.0.0` | Exactly this version |
-| Caret | `^1.0.0` | Compatible with 1.x.x |
-| Tilde | `~1.0.0` | Compatible with 1.0.x |
-| Range | `>=1.0.0,<2.0.0` | Within range |
-| Wildcard | `1.*` | Any 1.x version |
+| Format   | Example          | Description           |
+| -------- | ---------------- | --------------------- |
+| Exact    | `=1.0.0`         | Exactly this version  |
+| Caret    | `^1.0.0`         | Compatible with 1.x.x |
+| Tilde    | `~1.0.0`         | Compatible with 1.0.x |
+| Range    | `>=1.0.0,<2.0.0` | Within range          |
+| Wildcard | `1.*`            | Any 1.x version       |
 
 ## Registry and Repository
 

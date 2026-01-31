@@ -1,4 +1,5 @@
 # The Manifest Format
+
 The `Proto.toml` manifest file describes your buffrs package and its dependencies. This page documents the complete manifest format.
 
 ## `[package]` Section
@@ -15,12 +16,12 @@ description = "Optional description"
 
 ### Fields
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `type` | Yes | Package type: `lib` (library) or `api` (service definition) |
-| `name` | Yes | Package name (lowercase, alphanumeric, hyphens allowed) |
-| `version` | Yes | SemVer version string |
-| `description` | No | Human-readable package description |
+| Field         | Required | Description                                                 |
+| ------------- | -------- | ----------------------------------------------------------- |
+| `type`        | Yes      | Package type: `lib` (library) or `api` (service definition) |
+| `name`        | Yes      | Package name (lowercase, alphanumeric, hyphens allowed)     |
+| `version`     | Yes      | SemVer version string                                       |
+| `description` | No       | Human-readable package description                          |
 
 ## `[dependencies]` Section
 
@@ -44,13 +45,13 @@ repository = "common"
 
 ### Dependency Fields
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `version` | Yes | Version requirement (e.g., `=1.0.0`, `^1.0`, `>=1.0,<2.0`) |
-| `registry` | Yes* | Registry URL or alias |
-| `repository` | Yes* | Repository name within the registry |
-| `resolver` | No | Resolution mode: `default` or `multiversion` |
-| `namespace_overlap` | No | For multiversion: `forbidden`, `identical_only`, or `allowed` |
+| Field               | Required | Description                                                   |
+| ------------------- | -------- | ------------------------------------------------------------- |
+| `version`           | Yes      | Version requirement (e.g., `=1.0.0`, `^1.0`, `>=1.0,<2.0`)    |
+| `registry`          | Yes*     | Registry URL or alias                                         |
+| `repository`        | Yes*     | Repository name within the registry                           |
+| `resolver`          | No       | Resolution mode: `default` or `multiversion`                  |
+| `namespace_overlap` | No       | For multiversion: `forbidden`, `identical_only`, or `allowed` |
 
 *Required for remote dependencies; omit for local dependencies.
 
@@ -88,18 +89,18 @@ namespace_overlap = "forbidden"     # Default: fail on namespace collision
 
 ### `resolver` Values
 
-| Value | Description |
-|-------|-------------|
-| `default` | Single-version resolution (one version per package name) |
-| `multiversion` | Allow multiple versions if constraints require it |
+| Value          | Description                                              |
+| -------------- | -------------------------------------------------------- |
+| `default`      | Single-version resolution (one version per package name) |
+| `multiversion` | Allow multiple versions if constraints require it        |
 
 ### `namespace_overlap` Values
 
-| Value | Description |
-|-------|-------------|
-| `forbidden` | Fail if multiple versions declare the same protobuf namespace |
-| `identical_only` | Allow overlap only if proto file content hashes match |
-| `allowed` | Allow overlap (explicit hazard acknowledgment) |
+| Value            | Description                                                   |
+| ---------------- | ------------------------------------------------------------- |
+| `forbidden`      | Fail if multiple versions declare the same protobuf namespace |
+| `identical_only` | Allow overlap only if proto file content hashes match         |
+| `allowed`        | Allow overlap (explicit hazard acknowledgment)                |
 
 ## Edition
 

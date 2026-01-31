@@ -30,13 +30,13 @@ Error:   × could not deserialize Proto.toml
 
 Buffrs 0.50.0 supports the following editions:
 
-| Edition | Buffrs Version | Notes |
-|---------|---------------|-------|
-| `0.50` | 0.50.x | Current edition with multi-version support |
-| `0.10` | 0.10.x | Previous stable edition |
-| `0.9` | 0.9.x | Legacy edition |
-| `0.8` | 0.8.x | Legacy edition |
-| `0.7` | 0.7.x | Legacy edition |
+| Edition | Buffrs Version | Notes                                      |
+| ------- | -------------- | ------------------------------------------ |
+| `0.50`  | 0.50.x         | Current edition with multi-version support |
+| `0.10`  | 0.10.x         | Previous stable edition                    |
+| `0.9`   | 0.9.x          | Legacy edition                             |
+| `0.8`   | 0.8.x          | Legacy edition                             |
+| `0.7`   | 0.7.x          | Legacy edition                             |
 
 ### Canary Editions
 

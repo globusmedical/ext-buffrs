@@ -29,8 +29,8 @@ skip_link_safety_check = false
 
 ### `[registry]` Section
 
-| Field | Description |
-|-------|-------------|
+| Field     | Description                                      |
+| --------- | ------------------------------------------------ |
 | `default` | Default registry alias to use when not specified |
 
 ### `[registries]` Section
@@ -65,10 +65,10 @@ default_args = ["--generate-buf-yaml", "--generate-tonic-proto-module", "src/pro
 
 Control dependency resolution behavior:
 
-| Field | Default | Description |
-|-------|---------|-------------|
+| Field                     | Default | Description                                                         |
+| ------------------------- | ------- | ------------------------------------------------------------------- |
 | `allow_multiple_versions` | `false` | Global multi-version permission (deprecated; prefer per-dependency) |
-| `skip_link_safety_check` | `false` | Skip proto namespace collision checks |
+| `skip_link_safety_check`  | `false` | Skip proto namespace collision checks                               |
 
 > **Note**: The `allow_multiple_versions` config option is deprecated. Prefer using `resolver = "multiversion"` per-dependency in `Proto.toml`.
 
