@@ -17,7 +17,7 @@ use crate::{
     lock::{FileRequirement, Lockfile},
     manifest::{
         Dependency, DependencyManifest, LocalDependencyManifest, Manifest,
-        RemoteDependencyManifest, MANIFEST_FILE,
+        NamespaceOverlapPolicy, RemoteDependencyManifest, ResolverMode, MANIFEST_FILE,
     },
     package::{Package, PackageName, PackageStore},
     registry::{Artifactory, CertValidationPolicy, RegistryRef},
@@ -121,12 +121,21 @@ pub struct Dependant {
     pub name: PackageName,
     /// Version requirement
     pub version_req: VersionReq,
+    /// Whether this edge allows multi-version resolution
+    pub allows_multiversion: bool,
+    /// Namespace overlap policy for this edge
+    pub namespace_overlap_policy: NamespaceOverlapPolicy,
 }
 
 /// Represents direct and transitive dependencies of the root package
 #[derive(Debug, Clone, Default)]
 pub struct DependencyGraph {
+    /// Global flag to allow multiple versions (from config, deprecated)
     pub(crate) allow_multiple_versions: bool,
+    /// Set of package names that have at least one edge with multiversion permission
+    pub(crate) multiversion_permitted: std::collections::HashSet<PackageName>,
+    /// Namespace overlap policies per package name (most permissive wins)
+    pub(crate) namespace_policies: HashMap<PackageName, NamespaceOverlapPolicy>,
     pub(crate) roots: Vec<ResolvedPackageId>,
     pub(crate) entries: HashMap<ResolvedPackageId, ResolvedDependency>,
 }
@@ -187,6 +196,8 @@ impl DependencyGraph {
     pub fn new(allow_multiple_versions: bool) -> Self {
         Self {
             allow_multiple_versions,
+            multiversion_permitted: std::collections::HashSet::new(),
+            namespace_policies: HashMap::new(),
             roots: Vec::new(),
             entries: HashMap::new(),
         }
@@ -207,8 +218,50 @@ impl DependencyGraph {
         &self.roots
     }
 
+    /// Returns true if multi-version is globally enabled (deprecated config flag).
     pub fn allow_multiple_versions(&self) -> bool {
         self.allow_multiple_versions
+    }
+
+    /// Returns true if multi-version is permitted for a specific package name.
+    ///
+    /// This checks both the global config flag and per-dependency opt-in.
+    pub fn is_multiversion_permitted(&self, name: &PackageName) -> bool {
+        self.allow_multiple_versions || self.multiversion_permitted.contains(name)
+    }
+
+    /// Returns the effective namespace overlap policy for a package name.
+    ///
+    /// If multiple edges specify different policies, the most permissive wins.
+    pub fn namespace_policy(&self, name: &PackageName) -> NamespaceOverlapPolicy {
+        self.namespace_policies
+            .get(name)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Grant multi-version permission for a package name.
+    pub fn permit_multiversion(&mut self, name: &PackageName) {
+        self.multiversion_permitted.insert(name.clone());
+    }
+
+    /// Update namespace policy for a package name (most permissive wins).
+    pub fn update_namespace_policy(&mut self, name: &PackageName, policy: NamespaceOverlapPolicy) {
+        let current = self.namespace_policies.entry(name.clone()).or_default();
+        // Most permissive wins: Allowed > IdenticalOnly > Forbidden
+        let new_permissiveness = match policy {
+            NamespaceOverlapPolicy::Allowed => 2,
+            NamespaceOverlapPolicy::IdenticalOnly => 1,
+            NamespaceOverlapPolicy::Forbidden => 0,
+        };
+        let current_permissiveness = match *current {
+            NamespaceOverlapPolicy::Allowed => 2,
+            NamespaceOverlapPolicy::IdenticalOnly => 1,
+            NamespaceOverlapPolicy::Forbidden => 0,
+        };
+        if new_permissiveness > current_permissiveness {
+            *current = policy;
+        }
     }
 
     /// Returns a list of vendor module directory names used by this graph.
@@ -328,6 +381,12 @@ impl<'a> DependencyGraphBuilder<'a> {
         parent_dir: &Path,
         deps: &mut DependencyGraph,
     ) -> miette::Result<ResolvedPackageId> {
+        // Track per-dependency resolver permissions
+        if dependency.allows_multiversion() {
+            deps.permit_multiversion(&dependency.package);
+        }
+        deps.update_namespace_policy(&dependency.package, dependency.namespace_overlap_policy());
+
         let id = match dependency.manifest {
             DependencyManifest::Remote(manifest) => {
                 self.process_remote_dependency(
@@ -423,7 +482,8 @@ impl<'a> DependencyGraphBuilder<'a> {
                 );
 
                 // In single-version mode, also ensure no clash with already-resolved entry.
-                if !deps.allow_multiple_versions {
+                // Use per-dependency permission if granted, otherwise fall back to global config.
+                if !deps.is_multiversion_permitted(package.name()) {
                     if let Some(entry) = deps.get_single_by_name(package.name()) {
                         let existing_package = entry.package();
                         ensure!(
@@ -470,6 +530,8 @@ impl<'a> DependencyGraphBuilder<'a> {
                     dependants.push(Dependant {
                         name,
                         version_req: VersionReq::STAR,
+                        allows_multiversion: false,
+                        namespace_overlap_policy: NamespaceOverlapPolicy::Forbidden,
                     });
                     return Ok(dependency_id);
                 }
@@ -506,6 +568,8 @@ impl<'a> DependencyGraphBuilder<'a> {
                 dependants: vec![Dependant {
                     name,
                     version_req: VersionReq::STAR,
+                    allows_multiversion: false,
+                    namespace_overlap_policy: NamespaceOverlapPolicy::Forbidden,
                 }],
                 depends_on: sub_dependency_ids,
             },
@@ -543,14 +607,20 @@ impl<'a> DependencyGraphBuilder<'a> {
                     );
                 }
                 ResolvedDependency::Remote { dependants, .. } => {
-                    dependants.push(Dependant { name, version_req });
+                    dependants.push(Dependant {
+                        name,
+                        version_req,
+                        allows_multiversion: matches!(dependency.manifest.resolver, ResolverMode::MultiVersion),
+                        namespace_overlap_policy: dependency.manifest.namespace_overlap,
+                    });
                     return Ok(existing_id.clone());
                 }
             }
         }
 
-        // If multi-version is disabled, detect name collisions and fail early.
-        if !deps.allow_multiple_versions {
+        // If multi-version is disabled for this package, detect name collisions and fail early.
+        // Use per-dependency permission if granted, otherwise fall back to global config.
+        if !deps.is_multiversion_permitted(&dependency.package) {
             if let Some((existing_id, existing_entry)) = deps
                 .entries
                 .iter()
@@ -610,7 +680,12 @@ impl<'a> DependencyGraphBuilder<'a> {
                 package: dependency_pkg,
                 registry: dependency.manifest.registry,
                 repository: dependency.manifest.repository,
-                dependants: vec![Dependant { name, version_req }],
+                dependants: vec![Dependant {
+                    name,
+                    version_req,
+                    allows_multiversion: matches!(dependency.manifest.resolver, ResolverMode::MultiVersion),
+                    namespace_overlap_policy: dependency.manifest.namespace_overlap,
+                }],
                 depends_on: sub_dependency_ids,
             },
         );

@@ -396,7 +396,7 @@ mod tests {
         let mut file = File::create(&config_path).unwrap();
         file.write_all(
             br#"
-edition = "0.10"
+edition = "0.50"
 
 [registry]
 default = "acme"

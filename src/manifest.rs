@@ -47,6 +47,8 @@ pub enum Edition {
     /// at any time. Users are responsible for consulting documentation and
     /// help channels if errors occur.
     Canary,
+    /// The canary edition used by buffrs 0.10.x
+    Canary10,
     /// The canary edition used by buffrs 0.9.x
     Canary09,
     /// The canary edition used by buffrs 0.8.x
@@ -71,6 +73,7 @@ impl From<&str> for Edition {
     fn from(value: &str) -> Self {
         match value {
             self::CANARY_EDITION => Self::Canary,
+            "0.10" => Self::Canary10,
             "0.9" => Self::Canary09,
             "0.8" => Self::Canary08,
             "0.7" => Self::Canary07,
@@ -83,6 +86,7 @@ impl From<Edition> for &'static str {
     fn from(value: Edition) -> Self {
         match value {
             Edition::Canary => CANARY_EDITION,
+            Edition::Canary10 => "0.10",
             Edition::Canary09 => "0.9",
             Edition::Canary08 => "0.8",
             Edition::Canary07 => "0.7",
@@ -217,7 +221,7 @@ mod deserializer {
                     };
 
                     match Edition::from(edition.as_str()) {
-                        Edition::Canary | Edition::Canary09 | Edition::Canary08 | Edition::Canary07 => Ok(RawManifest::Canary {
+                        Edition::Canary | Edition::Canary10 | Edition::Canary09 | Edition::Canary08 | Edition::Canary07 => Ok(RawManifest::Canary {
                             package,
                             dependencies,
                         }),
@@ -242,7 +246,7 @@ impl From<Manifest> for RawManifest {
             .collect();
 
         match manifest.edition {
-            Edition::Canary | Edition::Canary09 | Edition::Canary08 | Edition::Canary07 => {
+            Edition::Canary | Edition::Canary10 | Edition::Canary09 | Edition::Canary08 | Edition::Canary07 => {
                 RawManifest::Canary {
                     package: manifest.package,
                     dependencies,
@@ -329,6 +333,8 @@ impl Manifest {
                             version: remote_manifest.version.clone(),
                             repository: remote_manifest.repository.clone(),
                             registry: remote_manifest.registry.with_alias_resolved(config)?,
+                            resolver: remote_manifest.resolver,
+                            namespace_overlap: remote_manifest.namespace_overlap,
                         })
                     }
                     DependencyManifest::Local(local_manifest) => {
@@ -343,6 +349,8 @@ impl Manifest {
                                     registry: remote_manifest
                                         .registry
                                         .with_alias_resolved(config)?,
+                                    resolver: remote_manifest.resolver,
+                                    namespace_overlap: remote_manifest.namespace_overlap,
                                 }),
                             })
                         } else {
@@ -565,6 +573,8 @@ impl Dependency {
                 repository,
                 version,
                 registry: registry.to_owned(),
+                resolver: ResolverMode::default(),
+                namespace_overlap: NamespaceOverlapPolicy::default(),
             }
             .into(),
         }
@@ -587,6 +597,35 @@ impl Dependency {
         }
 
         dependency
+    }
+
+    /// Returns the resolver mode for this dependency edge.
+    pub fn resolver_mode(&self) -> ResolverMode {
+        match &self.manifest {
+            DependencyManifest::Remote(m) => m.resolver,
+            DependencyManifest::Local(m) => m
+                .publish
+                .as_ref()
+                .map(|p| p.resolver)
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Returns the namespace overlap policy for this dependency edge.
+    pub fn namespace_overlap_policy(&self) -> NamespaceOverlapPolicy {
+        match &self.manifest {
+            DependencyManifest::Remote(m) => m.namespace_overlap,
+            DependencyManifest::Local(m) => m
+                .publish
+                .as_ref()
+                .map(|p| p.namespace_overlap)
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Returns true if this dependency allows multiple versions.
+    pub fn allows_multiversion(&self) -> bool {
+        matches!(self.resolver_mode(), ResolverMode::MultiVersion)
     }
 }
 
@@ -621,6 +660,35 @@ impl DependencyManifest {
     }
 }
 
+/// Resolver mode for a dependency edge.
+///
+/// Controls whether multiple versions of the same package name can coexist.
+#[derive(Debug, Clone, Copy, Hash, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ResolverMode {
+    /// Default: single-version resolution (one version per package name)
+    #[default]
+    Default,
+    /// Allow multiple versions of this package if constraints require it
+    #[serde(rename = "multiversion")]
+    MultiVersion,
+}
+
+/// Namespace overlap policy for multi-version scenarios.
+///
+/// Controls what happens when multiple versions declare the same protobuf namespace.
+#[derive(Debug, Clone, Copy, Hash, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NamespaceOverlapPolicy {
+    /// Default: fail if two versions declare the same namespace
+    #[default]
+    Forbidden,
+    /// Allow overlap only if proto file content hashes match
+    IdenticalOnly,
+    /// Allow overlap (dangerous - explicit hazard acknowledgment)
+    Allowed,
+}
+
 /// Manifest format for dependencies
 #[derive(Debug, Clone, Hash, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoteDependencyManifest {
@@ -630,6 +698,20 @@ pub struct RemoteDependencyManifest {
     pub repository: String,
     /// Artifactory registry to pull from
     pub registry: RegistryRef,
+    /// Resolver mode for this dependency edge (default: single-version)
+    #[serde(default, skip_serializing_if = "is_default_resolver")]
+    pub resolver: ResolverMode,
+    /// Namespace overlap policy when multi-version is enabled
+    #[serde(default, skip_serializing_if = "is_default_namespace_policy")]
+    pub namespace_overlap: NamespaceOverlapPolicy,
+}
+
+fn is_default_resolver(mode: &ResolverMode) -> bool {
+    matches!(mode, ResolverMode::Default)
+}
+
+fn is_default_namespace_policy(policy: &NamespaceOverlapPolicy) -> bool {
+    matches!(policy, NamespaceOverlapPolicy::Forbidden)
 }
 
 impl From<RemoteDependencyManifest> for DependencyManifest {
@@ -670,6 +752,10 @@ mod dependency_manifest_deserializer {
                 version: Option<VersionReq>,
                 repository: Option<String>,
                 registry: Option<RegistryRef>,
+                #[serde(default)]
+                resolver: ResolverMode,
+                #[serde(default)]
+                namespace_overlap: NamespaceOverlapPolicy,
             }
 
             let temp: TempManifest = TempManifest::deserialize(deserializer)?;
@@ -684,6 +770,8 @@ mod dependency_manifest_deserializer {
                                 version,
                                 repository,
                                 registry,
+                                resolver: temp.resolver,
+                                namespace_overlap: temp.namespace_overlap,
                             })
                         }
                         _ => None,
@@ -697,6 +785,8 @@ mod dependency_manifest_deserializer {
                     version,
                     repository,
                     registry,
+                    resolver: temp.resolver,
+                    namespace_overlap: temp.namespace_overlap,
                 }))
             } else {
                 Err(D::Error::custom("Invalid dependency manifest"))
