@@ -23,18 +23,40 @@ Error:   × could not deserialize Proto.toml
         |
       1 | edition = "0.7"
         | ^^^^^^^^^^^^^^^
-      unsupported manifest edition, supported editions of 0.8.0 are: 0.8
+      unsupported manifest edition, supported editions of 0.50.0 are: 0.50
 ```
+
+### Edition Compatibility
+
+Buffrs 0.50.0 supports the following editions:
+
+| Edition | Buffrs Version | Notes |
+|---------|---------------|-------|
+| `0.50` | 0.50.x | Current edition with multi-version support |
+| `0.10` | 0.10.x | Previous stable edition |
+| `0.9` | 0.9.x | Legacy edition |
+| `0.8` | 0.8.x | Legacy edition |
+| `0.7` | 0.7.x | Legacy edition |
 
 ### Canary Editions
 
 ```toml
-edition = "0.7"
+edition = "0.50"
 ```
 
 Canary editions are short-lived editions that are attached to a specific
 minor release of buffrs in the `0.x.x` version range. The edition name contains
-the minor version it is usable for. E.g. the edition `0.7` is usable /
-supported by all `0.7.x` buffrs releases. Compatibility beyond minor releases
+the minor version it is usable for. E.g. the edition `0.50` is usable /
+supported by all `0.50.x` buffrs releases. Compatibility beyond minor releases
 is not guaranteed as fundamental breaking changes may be introduced between
 editions.
+
+### Edition 0.50 Features
+
+Edition 0.50 introduces:
+
+- **Per-dependency multi-version support**: Use `resolver = "multiversion"` to allow multiple versions of the same package
+- **Namespace overlap policies**: Control how proto namespace collisions are handled with `namespace_overlap`
+- **Version-qualified vendor directories**: Multi-version packages use `name@version/` directory format
+
+See [Multi-Version Dependencies](../guide/multi-version-dependencies.md) for details.
