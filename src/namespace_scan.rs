@@ -161,10 +161,10 @@ pub fn extract_proto_package(contents: &str) -> Option<String> {
     while i + 7 <= bytes.len() {
         // look for "package" keyword
         if &bytes[i..i + 7] == b"package" {
-            let prev_ok = i == 0
-                || !matches!(bytes[i - 1], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
-            let next_ok = i + 7 == bytes.len()
-                || matches!(bytes[i + 7], b' ' | b'\t' | b'\r' | b'\n');
+            let prev_ok =
+                i == 0 || !matches!(bytes[i - 1], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
+            let next_ok =
+                i + 7 == bytes.len() || matches!(bytes[i + 7], b' ' | b'\t' | b'\r' | b'\n');
             if prev_ok && next_ok {
                 let mut j = i + 7;
                 while j < bytes.len() && matches!(bytes[j], b' ' | b'\t' | b'\r' | b'\n') {

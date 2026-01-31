@@ -246,12 +246,14 @@ impl From<Manifest> for RawManifest {
             .collect();
 
         match manifest.edition {
-            Edition::Canary | Edition::Canary10 | Edition::Canary09 | Edition::Canary08 | Edition::Canary07 => {
-                RawManifest::Canary {
-                    package: manifest.package,
-                    dependencies,
-                }
-            }
+            Edition::Canary
+            | Edition::Canary10
+            | Edition::Canary09
+            | Edition::Canary08
+            | Edition::Canary07 => RawManifest::Canary {
+                package: manifest.package,
+                dependencies,
+            },
             Edition::Unknown => RawManifest::Unknown {
                 package: manifest.package,
                 dependencies,
@@ -603,11 +605,9 @@ impl Dependency {
     pub fn resolver_mode(&self) -> ResolverMode {
         match &self.manifest {
             DependencyManifest::Remote(m) => m.resolver,
-            DependencyManifest::Local(m) => m
-                .publish
-                .as_ref()
-                .map(|p| p.resolver)
-                .unwrap_or_default(),
+            DependencyManifest::Local(m) => {
+                m.publish.as_ref().map(|p| p.resolver).unwrap_or_default()
+            }
         }
     }
 

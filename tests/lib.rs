@@ -112,9 +112,8 @@ impl VirtualFileSystem {
             let filter_proto_toml_orig = |f: &PathBuf| !f.ends_with("Proto.toml.orig");
 
             // Skip _buffrs_meta/ directory as its content is dynamically generated
-            let filter_buffrs_meta = |f: &PathBuf| {
-                !f.components().any(|c| c.as_os_str() == "_buffrs_meta")
-            };
+            let filter_buffrs_meta =
+                |f: &PathBuf| !f.components().any(|c| c.as_os_str() == "_buffrs_meta");
 
             let mut actual_files: Vec<PathBuf> = vfs
                 .files

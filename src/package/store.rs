@@ -130,23 +130,14 @@ impl PackageStore {
 
         package.unpack(&pkg_dir).await?;
 
-        tracing::debug!(
-            ":: unpacked {} into {}",
-            id,
-            pkg_dir.display()
-        );
+        tracing::debug!(":: unpacked {} into {}", id, pkg_dir.display());
 
         Ok(())
     }
 
     /// Directory for the vendored installation of a resolved package instance.
-    pub fn locate_resolved(
-        &self,
-        id: &ResolvedPackageId,
-        graph: &DependencyGraph,
-    ) -> PathBuf {
-        self.proto_vendor_path()
-            .join(id.vendor_dir_name(graph))
+    pub fn locate_resolved(&self, id: &ResolvedPackageId, graph: &DependencyGraph) -> PathBuf {
+        self.proto_vendor_path().join(id.vendor_dir_name(graph))
     }
 
     /// Uninstalls a package from the local file system

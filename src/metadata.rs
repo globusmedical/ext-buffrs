@@ -138,10 +138,7 @@ pub struct NamespaceOwner {
 /// Emits metadata files to the `_buffrs_meta/` directory.
 ///
 /// Only creates metadata if there are packages in the graph.
-pub async fn emit_metadata(
-    graph: &DependencyGraph,
-    vendor_root: &Path,
-) -> miette::Result<()> {
+pub async fn emit_metadata(graph: &DependencyGraph, vendor_root: &Path) -> miette::Result<()> {
     // Skip metadata emission if graph is empty
     if graph.is_empty() {
         return Ok(());
@@ -244,11 +241,7 @@ fn build_graph_metadata(
     }
 
     // Sort packages for deterministic output
-    packages.sort_by(|a, b| {
-        a.name
-            .cmp(&b.name)
-            .then_with(|| a.version.cmp(&b.version))
-    });
+    packages.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.version.cmp(&b.version)));
 
     Ok(GraphMetadata {
         buffrs_version: env!("CARGO_PKG_VERSION").to_string(),

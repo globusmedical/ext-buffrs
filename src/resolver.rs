@@ -3,8 +3,7 @@ use miette::{bail, ensure, Context, Diagnostic, IntoDiagnostic};
 use semver::{Version, VersionReq};
 use std::{
     collections::HashMap,
-    env,
-    fmt,
+    env, fmt,
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
 };
@@ -16,8 +15,8 @@ use crate::{
     credentials::Credentials,
     lock::{FileRequirement, Lockfile},
     manifest::{
-        Dependency, DependencyManifest, LocalDependencyManifest, Manifest,
-        NamespaceOverlapPolicy, RemoteDependencyManifest, ResolverMode, MANIFEST_FILE,
+        Dependency, DependencyManifest, LocalDependencyManifest, Manifest, NamespaceOverlapPolicy,
+        RemoteDependencyManifest, ResolverMode, MANIFEST_FILE,
     },
     package::{Package, PackageName, PackageStore},
     registry::{Artifactory, CertValidationPolicy, RegistryRef},
@@ -367,13 +366,13 @@ impl<'a> DependencyGraphBuilder<'a> {
         for dependency in &self.manifest.dependencies {
             let id = self
                 .process_dependency(
-                name.clone(),
-                dependency.clone(),
-                true, // is_root
-                &parent_dir,
-                &mut deps,
-            )
-            .await?;
+                    name.clone(),
+                    dependency.clone(),
+                    true, // is_root
+                    &parent_dir,
+                    &mut deps,
+                )
+                .await?;
             roots.push(id);
         }
 
@@ -478,7 +477,12 @@ impl<'a> DependencyGraphBuilder<'a> {
 
             // Ensure that the package version doesn't clash with an existing entry,
             // and that it matches the version requirement in the manifest
-            if let Some(version_req) = dependency.manifest.publish.map(|p| p.version) {
+            if let Some(version_req) = dependency
+                .manifest
+                .publish
+                .as_ref()
+                .map(|p| p.version.clone())
+            {
                 let found_version = package.version();
 
                 // Always verify the version requirement against the built package.
@@ -530,17 +534,32 @@ impl<'a> DependencyGraphBuilder<'a> {
             first.1.package().clone()
         };
 
-        let dependency_id = ResolvedPackageId::new(package.name().clone(), package.version().clone());
+        let dependency_id =
+            ResolvedPackageId::new(package.name().clone(), package.version().clone());
 
         // Check if this local dependency is already resolved (same name+version)
+        // Extract multiversion settings from the local dependency's publish section
+        let allows_multiversion = dependency
+            .manifest
+            .publish
+            .as_ref()
+            .map(|p| matches!(p.resolver, ResolverMode::MultiVersion))
+            .unwrap_or(false);
+        let namespace_overlap_policy = dependency
+            .manifest
+            .publish
+            .as_ref()
+            .map(|p| p.namespace_overlap)
+            .unwrap_or_default();
+
         if let Some(existing) = deps.get_mut(&dependency_id) {
             match existing {
                 ResolvedDependency::Local { dependants, .. } => {
                     dependants.push(Dependant {
                         name,
                         version_req: VersionReq::STAR,
-                        allows_multiversion: false,
-                        namespace_overlap_policy: NamespaceOverlapPolicy::Forbidden,
+                        allows_multiversion,
+                        namespace_overlap_policy,
                     });
                     return Ok(dependency_id);
                 }
@@ -577,8 +596,8 @@ impl<'a> DependencyGraphBuilder<'a> {
                 dependants: vec![Dependant {
                     name,
                     version_req: VersionReq::STAR,
-                    allows_multiversion: false,
-                    namespace_overlap_policy: NamespaceOverlapPolicy::Forbidden,
+                    allows_multiversion,
+                    namespace_overlap_policy,
                 }],
                 depends_on: sub_dependency_ids,
             },
@@ -605,7 +624,9 @@ impl<'a> DependencyGraphBuilder<'a> {
             .find(|(id, _)| id.name() == &dependency.package && version_req.matches(id.version()))
         {
             match existing_entry {
-                ResolvedDependency::Local { path, dependants, .. } => {
+                ResolvedDependency::Local {
+                    path, dependants, ..
+                } => {
                     bail!(
                         "a dependency of your project requires {}@{} which collides with a local dependency for {}@{} required by {:?}",
                         dependency.package,
@@ -619,7 +640,10 @@ impl<'a> DependencyGraphBuilder<'a> {
                     dependants.push(Dependant {
                         name,
                         version_req,
-                        allows_multiversion: matches!(dependency.manifest.resolver, ResolverMode::MultiVersion),
+                        allows_multiversion: matches!(
+                            dependency.manifest.resolver,
+                            ResolverMode::MultiVersion
+                        ),
                         namespace_overlap_policy: dependency.manifest.namespace_overlap,
                     });
                     return Ok(existing_id.clone());
@@ -692,7 +716,10 @@ impl<'a> DependencyGraphBuilder<'a> {
                 dependants: vec![Dependant {
                     name,
                     version_req,
-                    allows_multiversion: matches!(dependency.manifest.resolver, ResolverMode::MultiVersion),
+                    allows_multiversion: matches!(
+                        dependency.manifest.resolver,
+                        ResolverMode::MultiVersion
+                    ),
                     namespace_overlap_policy: dependency.manifest.namespace_overlap,
                 }],
                 depends_on: sub_dependency_ids,

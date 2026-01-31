@@ -19,8 +19,7 @@ use crate::{
     integration::{buf_yaml, path_util::PathUtil},
     lock::{LockedDependency, LockedPackage, Lockfile},
     manifest::{Dependency, Manifest, PackageManifest, MANIFEST_FILE},
-    metadata,
-    namespace_scan,
+    metadata, namespace_scan,
     package::{Package, PackageName, PackageStore, PackageType},
     registry::{Artifactory, CertValidationPolicy, RegistryRef, RegistryUri},
     resolver::{DependencyGraph, DependencyGraphBuilder, ResolvedDependency, ResolvedPackageId},
@@ -351,13 +350,13 @@ pub async fn publish(
     if env::var(BUFFRS_TESTSUITE_VAR).is_err() {
         if let Ok(statuses) = git_statuses().await {
             if !allow_dirty && !statuses.is_empty() {
-            tracing::error!("{} files in the working directory contain changes that were not yet committed into git:\n", statuses.len());
+                tracing::error!("{} files in the working directory contain changes that were not yet committed into git:\n", statuses.len());
 
-            statuses.iter().for_each(|s| tracing::error!("{}", s));
+                statuses.iter().for_each(|s| tracing::error!("{}", s));
 
-            tracing::error!("\nTo proceed with publishing despite the uncommitted changes, pass the `--allow-dirty` flag\n");
+                tracing::error!("\nTo proceed with publishing despite the uncommitted changes, pass the `--allow-dirty` flag\n");
 
-            bail!("attempted to publish a dirty repository");
+                bail!("attempted to publish a dirty repository");
             }
         }
     }
@@ -456,7 +455,10 @@ pub async fn install(
         store
             .unpack_resolved(resolved.package(), id, graph)
             .await
-            .wrap_err(miette!("failed to unpack package {}", &resolved.package().name()))?;
+            .wrap_err(miette!(
+                "failed to unpack package {}",
+                &resolved.package().name()
+            ))?;
 
         tracing::info!(
             "{} installed {}@{}",
@@ -508,18 +510,22 @@ pub async fn install(
     }
 
     for dependency in dependency_graph.roots() {
-        traverse_and_install(dependency, &dependency_graph, &store, &mut locked, &mut visited, String::new())
-            .await?;
+        traverse_and_install(
+            dependency,
+            &dependency_graph,
+            &store,
+            &mut locked,
+            &mut visited,
+            String::new(),
+        )
+        .await?;
     }
 
     /// Validates config orthogonality (DR-BUFFRS-1420).
     ///
     /// Warns if the lockfile has multiversion packages but the manifest no longer
     /// grants multiversion permission for them.
-    fn check_config_orthogonality(
-        manifest: &Manifest,
-        lockfile: &Lockfile,
-    ) {
+    fn check_config_orthogonality(manifest: &Manifest, lockfile: &Lockfile) {
         let lock_state = lockfile.multiversion_state();
         if !lock_state.has_multiversion() {
             return;
@@ -555,8 +561,8 @@ pub async fn install(
         config: &Config,
     ) -> miette::Result<()> {
         // Check if any multiversion is in play (global flag or per-dependency)
-        let has_multiversion = graph.allow_multiple_versions()
-            || !graph.multiversion_permitted.is_empty();
+        let has_multiversion =
+            graph.allow_multiple_versions() || !graph.multiversion_permitted.is_empty();
 
         if !has_multiversion {
             return Ok(());
@@ -625,7 +631,9 @@ pub async fn install(
                             NamespaceOverlapPolicy::Allowed => {
                                 tracing::warn!(
                                     ":: namespace overlap allowed: '{}' declared by {} and {}",
-                                    pkg, other_id, id
+                                    pkg,
+                                    other_id,
+                                    id
                                 );
                             }
                             NamespaceOverlapPolicy::IdenticalOnly => {
