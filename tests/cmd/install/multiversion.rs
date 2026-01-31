@@ -244,6 +244,60 @@ resolver = "multiversion"
                     || consumer_cwd.join("proto/vendor/api-b@1.0.0").exists(),
                 "api-b should be installed"
             );
+
+            // Verify lib-base is installed with version-qualified directories
+            // because there are two versions (0.1.0 and 0.2.0)
+            assert!(
+                consumer_cwd.join("proto/vendor/lib-base@0.1.0").exists(),
+                "lib-base@0.1.0 should be installed in version-qualified directory"
+            );
+            assert!(
+                consumer_cwd.join("proto/vendor/lib-base@0.2.0").exists(),
+                "lib-base@0.2.0 should be installed in version-qualified directory"
+            );
+            // The plain 'lib-base' directory should NOT exist (would cause conflicts)
+            assert!(
+                !consumer_cwd.join("proto/vendor/lib-base").exists(),
+                "plain lib-base directory should not exist when multiple versions are installed"
+            );
+
+            // Verify metadata files are created
+            let meta_dir = consumer_cwd.join("proto/vendor/_buffrs_meta");
+            assert!(
+                meta_dir.exists(),
+                "_buffrs_meta directory should be created"
+            );
+            assert!(
+                meta_dir.join("graph.json").exists(),
+                "graph.json should be created"
+            );
+            assert!(
+                meta_dir.join("namespaces.json").exists(),
+                "namespaces.json should be created"
+            );
+            assert!(
+                meta_dir.join("buffrs.cmake").exists(),
+                "buffrs.cmake should be created"
+            );
+
+            // Verify graph.json contains expected packages
+            let graph_json = std::fs::read_to_string(meta_dir.join("graph.json")).unwrap();
+            assert!(
+                graph_json.contains("\"lib-base\""),
+                "graph.json should contain lib-base"
+            );
+            assert!(
+                graph_json.contains("\"0.1.0\"") && graph_json.contains("\"0.2.0\""),
+                "graph.json should contain both versions"
+            );
+
+            // Verify namespaces.json contains namespace mappings
+            let namespaces_json =
+                std::fs::read_to_string(meta_dir.join("namespaces.json")).unwrap();
+            assert!(
+                namespaces_json.contains("lib.base.v1") || namespaces_json.contains("lib.base.v2"),
+                "namespaces.json should contain namespace declarations"
+            );
         }
     });
 }

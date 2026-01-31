@@ -19,6 +19,8 @@ use crate::{
     integration::{buf_yaml, path_util::PathUtil},
     lock::{LockedDependency, LockedPackage, Lockfile},
     manifest::{Dependency, Manifest, PackageManifest, MANIFEST_FILE},
+    metadata,
+    namespace_scan,
     package::{Package, PackageName, PackageStore, PackageType},
     registry::{Artifactory, CertValidationPolicy, RegistryRef, RegistryUri},
     resolver::{DependencyGraph, DependencyGraphBuilder, ResolvedDependency, ResolvedPackageId},
@@ -445,7 +447,7 @@ pub async fn install(
         ))?;
 
         store
-            .unpack_resolved(resolved.package(), id, graph.allow_multiple_versions())
+            .unpack_resolved(resolved.package(), id, graph)
             .await
             .wrap_err(miette!("failed to unpack package {}", &resolved.package().name()))?;
 
@@ -503,90 +505,6 @@ pub async fn install(
             .await?;
     }
 
-    async fn extract_proto_package_statement(contents: &str) -> Option<String> {
-        // Strip comments (// and /* */) while keeping a simple character stream.
-        let mut out = String::with_capacity(contents.len());
-        let mut chars = contents.chars().peekable();
-        let mut in_block = false;
-
-        while let Some(c) = chars.next() {
-            if in_block {
-                if c == '*' {
-                    if let Some('/') = chars.peek().copied() {
-                        chars.next();
-                        in_block = false;
-                    }
-                }
-                continue;
-            }
-
-            if c == '/' {
-                match chars.peek().copied() {
-                    Some('/') => {
-                        // line comment
-                        while let Some(nc) = chars.next() {
-                            if nc == '\n' {
-                                out.push('\n');
-                                break;
-                            }
-                        }
-                        continue;
-                    }
-                    Some('*') => {
-                        chars.next();
-                        in_block = true;
-                        continue;
-                    }
-                    _ => {}
-                }
-            }
-
-            out.push(c);
-        }
-
-        // Find first `package ...;` statement.
-        let bytes = out.as_bytes();
-        let mut i = 0;
-        while i + 7 <= bytes.len() {
-            // look for "package" keyword
-            if &bytes[i..i + 7] == b"package" {
-                let prev_ok = i == 0
-                    || !matches!(bytes[i - 1], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
-                let next_ok = i + 7 == bytes.len()
-                    || matches!(bytes[i + 7], b' ' | b'\t' | b'\r' | b'\n');
-                if prev_ok && next_ok {
-                    let mut j = i + 7;
-                    while j < bytes.len() && matches!(bytes[j], b' ' | b'\t' | b'\r' | b'\n') {
-                        j += 1;
-                    }
-                    let start = j;
-                    while j < bytes.len()
-                        && matches!(
-                            bytes[j],
-                            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.'
-                        )
-                    {
-                        j += 1;
-                    }
-                    if start == j {
-                        return None;
-                    }
-                    while j < bytes.len() && matches!(bytes[j], b' ' | b'\t' | b'\r' | b'\n') {
-                        j += 1;
-                    }
-                    if j < bytes.len() && bytes[j] == b';' {
-                        let pkg = String::from_utf8_lossy(&bytes[start..j]).trim().to_string();
-                        return Some(pkg);
-                    }
-                }
-            }
-
-            i += 1;
-        }
-
-        None
-    }
-
     async fn ensure_multi_version_link_safety(
         graph: &DependencyGraph,
         store: &PackageStore,
@@ -611,7 +529,7 @@ pub async fn install(
             .keys()
             .cloned()
             .map(|id| {
-                let path = store.locate_resolved(&id, graph.allow_multiple_versions());
+                let path = store.locate_resolved(&id, graph);
                 (id, path)
             })
             .collect();
@@ -630,8 +548,7 @@ pub async fn install(
                     .into_diagnostic()
                     .wrap_err(miette!("failed to read proto file {}", proto.display()))?;
 
-                let pkg = extract_proto_package_statement(&contents)
-                    .await
+                let pkg = namespace_scan::extract_proto_package(&contents)
                     .unwrap_or_else(|| "<no package>".into());
 
                 if let Some((other_id, other_file)) = seen.get(&pkg) {
@@ -655,6 +572,9 @@ pub async fn install(
     }
 
     ensure_multi_version_link_safety(&dependency_graph, &store, &installed_local, config).await?;
+
+    // Emit metadata for build system integration
+    metadata::emit_metadata(&dependency_graph, &store.proto_vendor_path()).await?;
 
     for option in generation {
         match option {

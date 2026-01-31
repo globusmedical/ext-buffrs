@@ -117,15 +117,16 @@ impl PackageStore {
 
     /// Unpacks a resolved package instance into the vendor directory.
     ///
-    /// When multi-version mode is enabled, the destination folder includes the resolved version
-    /// to prevent overwriting other versions of the same package.
+    /// When multi-version mode is enabled for this package (either multiple versions resolved
+    /// or explicit `resolver = "multiversion"` on the dependency), the destination folder
+    /// includes the resolved version to prevent overwriting other versions.
     pub async fn unpack_resolved(
         &self,
         package: &Package,
         id: &ResolvedPackageId,
-        allow_multiple_versions: bool,
+        graph: &DependencyGraph,
     ) -> miette::Result<()> {
-        let pkg_dir = self.locate_resolved(id, allow_multiple_versions);
+        let pkg_dir = self.locate_resolved(id, graph);
 
         package.unpack(&pkg_dir).await?;
 
@@ -142,10 +143,10 @@ impl PackageStore {
     pub fn locate_resolved(
         &self,
         id: &ResolvedPackageId,
-        allow_multiple_versions: bool,
+        graph: &DependencyGraph,
     ) -> PathBuf {
         self.proto_vendor_path()
-            .join(id.vendor_dir_name(allow_multiple_versions))
+            .join(id.vendor_dir_name(graph))
     }
 
     /// Uninstalls a package from the local file system

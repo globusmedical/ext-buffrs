@@ -47,8 +47,17 @@ impl ResolvedPackageId {
         &self.version
     }
 
-    pub fn vendor_dir_name(&self, allow_multiple_versions: bool) -> String {
-        if allow_multiple_versions {
+    /// Returns the directory name for this package in the vendor folder.
+    ///
+    /// Returns a version-qualified name (`name@version`) when multiple versions
+    /// of this package are actually resolved in the graph.
+    ///
+    /// Note: The `resolver = "multiversion"` setting only grants *permission* to
+    /// have multiple versions; it doesn't force version-qualified names when
+    /// there's only one version.
+    pub fn vendor_dir_name(&self, graph: &DependencyGraph) -> String {
+        // Only use version-qualified names when there are actually multiple versions
+        if graph.ids_for_name(&self.name).len() > 1 {
             format!("{}@{}", self.name, self.version)
         } else {
             self.name.to_string()
@@ -269,7 +278,7 @@ impl DependencyGraph {
         let mut modules: Vec<String> = self
             .entries
             .keys()
-            .map(|id| id.vendor_dir_name(self.allow_multiple_versions))
+            .map(|id| id.vendor_dir_name(self))
             .collect();
 
         modules.sort();
