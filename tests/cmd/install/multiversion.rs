@@ -686,11 +686,15 @@ lib-algo-base-v2 = {{ package = "lib-algo-base", version = "=0.2.0", registry = 
 
             // Verify both versioned directories exist
             assert!(
-                consumer_cwd.join("proto/vendor/lib-algo-base@0.1.0").exists(),
+                consumer_cwd
+                    .join("proto/vendor/lib-algo-base@0.1.0")
+                    .exists(),
                 "lib-algo-base@0.1.0 directory should exist"
             );
             assert!(
-                consumer_cwd.join("proto/vendor/lib-algo-base@0.2.0").exists(),
+                consumer_cwd
+                    .join("proto/vendor/lib-algo-base@0.2.0")
+                    .exists(),
                 "lib-algo-base@0.2.0 directory should exist"
             );
 
