@@ -74,7 +74,7 @@ pub fn version_req_to_ranges(req: &VersionReq) -> SemverRanges {
         return Ranges::full();
     }
 
-    // Each comparator in a VersionReq is ANDed together
+    // Each comparator in a VersionReq is combined with AND
     let mut result = Ranges::full();
 
     for comp in &req.comparators {

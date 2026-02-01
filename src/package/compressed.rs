@@ -172,6 +172,10 @@ impl Package {
             );
         }
 
+        // Don't preserve Unix permissions on extraction - this prevents read-only
+        // files on Windows (tar entries have mode 0o444) and allows namespace rewriting
+        tar.set_preserve_permissions(false);
+
         fs::remove_dir_all(path).await.ok();
 
         fs::create_dir_all(path).await.into_diagnostic().wrap_err({

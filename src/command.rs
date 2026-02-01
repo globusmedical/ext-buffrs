@@ -419,6 +419,19 @@ async fn rewrite_proto_namespaces_in_dir(dir: &Path, version: &Version) -> miett
 
         // Only write if content changed
         if rewritten != contents {
+            // On Windows, files extracted from tar may be read-only. Make writable before writing.
+            #[cfg(windows)]
+            {
+                let mut perms = std::fs::metadata(&path)
+                    .into_diagnostic()
+                    .wrap_err(miette!("failed to get metadata for {}", path.display()))?
+                    .permissions();
+                perms.set_readonly(false);
+                std::fs::set_permissions(&path, perms)
+                    .into_diagnostic()
+                    .wrap_err(miette!("failed to set permissions for {}", path.display()))?;
+            }
+
             tokio::fs::write(&path, rewritten)
                 .await
                 .into_diagnostic()
