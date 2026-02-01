@@ -26,7 +26,7 @@ impl BufYamlFile {
 
     /// Create a new `BufYamlFile` from a string
     pub fn new_from_str(s: &str, store: &PackageStore) -> miette::Result<Self> {
-        let config: Config = serde_yml::from_str(s).into_diagnostic()?;
+        let config: Config = yaml_serde::from_str(s).into_diagnostic()?;
 
         // Version needs to be v2
         if config.version != "v2" {
@@ -60,7 +60,7 @@ impl BufYamlFile {
 
     /// Serialize the `BufYamlFile` to a string
     pub fn to_string(&self) -> miette::Result<String> {
-        let yaml = serde_yml::to_string(&self.config).into_diagnostic()?;
+        let yaml = yaml_serde::to_string(&self.config).into_diagnostic()?;
 
         // prettyfy the output
         let options = FormatOptions::default();
