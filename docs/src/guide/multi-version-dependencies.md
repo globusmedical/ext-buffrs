@@ -24,6 +24,26 @@ resolver = "multiversion"
 
 This grants *permission* for buffrs to resolve multiple versions of `lib-algo-base` if the dependency constraints require it. It does not force duplicates—if a single version satisfies all constraints, only one version is resolved.
 
+**Which dependencies need the flag?** Only the "outlier" dependency needs `resolver = "multiversion"`. For example, if six targets use `lib-algo-base@0.1.3` and one target uses `@0.1.2`, only the `@0.1.2` dependency needs the flag. The flag means "I accept coexisting with other versions of this package."
+
+## Impact on C++ Code
+
+**In most cases, no C++ code changes are required.**
+
+Generated C++ code paths and namespaces come from the `package` declarations inside `.proto` files (e.g., `package gm.algo.base.v1;`), **not** from vendor directory names. This means:
+
+| Scenario | C++ Code Changes? | Reason |
+|----------|-------------------|--------|
+| Same namespace, identical content | No | Files are identical |
+| Same namespace, different content | N/A | Build fails (`namespace_overlap = "forbidden"`) |
+| Versioned namespaces (v1 vs v2) | Maybe | Different C++ namespaces; update includes if switching versions |
+
+The vendor directory layout (`lib-algo-base@0.1.2/` vs `lib-algo-base@0.1.3/`) is an implementation detail that does not affect your `#include` statements or C++ namespace usage.
+
+**When C++ code might need changes:**
+- If you explicitly set `namespace_overlap = "allowed"` with different proto content, you risk ODR (One Definition Rule) violations at link time. This is strongly discouraged.
+- If you're migrating from one API version to another (e.g., `v1` → `v2`), you'll update your code to use the new namespace regardless of multi-version resolution.
+
 ## Vendor Layout
 
 When multi-version resolution results in multiple versions of the same package, buffrs uses version-qualified directory names:
@@ -104,12 +124,33 @@ See the [CMake Integration](#cmake-integration) section for information on link-
 
 ## CMake Integration
 
-> **Note**: CMake integration with link-unit validation is planned for a future release.
+Buffrs emits metadata in `_buffrs_meta/` that build systems can use for link-unit validation:
 
-Buffrs will provide a `buffrs_validate_link_unit()` CMake function that checks whether your final binary links multiple versions with overlapping namespaces. This catch conflicts at configure time rather than at runtime.
+- `graph.json` - Full dependency graph with versions, registries, relationships
+- `namespaces.json` - Mapping from protobuf namespaces to packages
+- `buffrs.cmake` - CMake variables for integration (data only)
+
+### Link-Unit Validation
+
+Build systems should implement their own `buffrs_validate_link_unit()` function to check whether a final binary links multiple targets with conflicting namespace sources. The validation logic:
+
+1. Collect `BUFFRS_NAMESPACE_SOURCES` properties from all linked targets
+2. For each namespace, verify all sources resolve to the same `package@version`
+3. Fail at configure time if conflicts are detected
+
+Example CMake implementation pattern:
+
+```cmake
+function(buffrs_validate_link_unit TARGET)
+    # Collect namespace sources from target and all its dependencies
+    # Check for conflicts (same namespace from different package@version)
+    # Report error if conflicts found
+endfunction()
+```
+
+This catches multi-version namespace conflicts at configure time rather than experiencing mysterious runtime failures.
 
 ## Limitations
 
 - Multi-version resolution is per-`Proto.toml`, not global across a monorepo
-- Namespace policy enforcement requires future metadata emission features
-- CMake link-time validation is not yet implemented
+- Build systems must implement their own link-unit validation using the emitted metadata
