@@ -335,14 +335,15 @@ impl Manifest {
                             .clone()
                             .unwrap_or_else(|| toml_key.clone());
                         // For remote manifest dependencies, resolve the registry alias
-                        let resolved_manifest = DependencyManifest::Remote(RemoteDependencyManifest {
-                            package: remote_manifest.package.clone(),
-                            version: remote_manifest.version.clone(),
-                            repository: remote_manifest.repository.clone(),
-                            registry: remote_manifest.registry.with_alias_resolved(config)?,
-                            resolver: remote_manifest.resolver,
-                            namespace_overlap: remote_manifest.namespace_overlap,
-                        });
+                        let resolved_manifest =
+                            DependencyManifest::Remote(RemoteDependencyManifest {
+                                package: remote_manifest.package.clone(),
+                                version: remote_manifest.version.clone(),
+                                repository: remote_manifest.repository.clone(),
+                                registry: remote_manifest.registry.with_alias_resolved(config)?,
+                                resolver: remote_manifest.resolver,
+                                namespace_overlap: remote_manifest.namespace_overlap,
+                            });
                         (package, resolved_manifest)
                     }
                     DependencyManifest::Local(local_manifest) => {
@@ -354,19 +355,20 @@ impl Manifest {
                             .and_then(|p| p.package.clone())
                             .unwrap_or_else(|| toml_key.clone());
                         if let Some(ref remote_manifest) = local_manifest.publish {
-                            let resolved_manifest = DependencyManifest::Local(LocalDependencyManifest {
-                                path: local_manifest.path.clone(),
-                                publish: Some(RemoteDependencyManifest {
-                                    package: remote_manifest.package.clone(),
-                                    version: remote_manifest.version.clone(),
-                                    repository: remote_manifest.repository.clone(),
-                                    registry: remote_manifest
-                                        .registry
-                                        .with_alias_resolved(config)?,
-                                    resolver: remote_manifest.resolver,
-                                    namespace_overlap: remote_manifest.namespace_overlap,
-                                }),
-                            });
+                            let resolved_manifest =
+                                DependencyManifest::Local(LocalDependencyManifest {
+                                    path: local_manifest.path.clone(),
+                                    publish: Some(RemoteDependencyManifest {
+                                        package: remote_manifest.package.clone(),
+                                        version: remote_manifest.version.clone(),
+                                        repository: remote_manifest.repository.clone(),
+                                        registry: remote_manifest
+                                            .registry
+                                            .with_alias_resolved(config)?,
+                                        resolver: remote_manifest.resolver,
+                                        namespace_overlap: remote_manifest.namespace_overlap,
+                                    }),
+                                });
                             (package, resolved_manifest)
                         } else {
                             (package, manifest.clone())
@@ -374,7 +376,10 @@ impl Manifest {
                     }
                 };
 
-                Ok(Dependency { package, manifest: resolved_manifest })
+                Ok(Dependency {
+                    package,
+                    manifest: resolved_manifest,
+                })
             })
             .collect::<miette::Result<Vec<_>>>()?;
 
@@ -841,7 +846,10 @@ type = "lib"
             manifest.dependencies
         );
         assert!(manifest.package.is_some());
-        assert_eq!(manifest.package.as_ref().unwrap().name.to_string(), "test-package");
+        assert_eq!(
+            manifest.package.as_ref().unwrap().name.to_string(),
+            "test-package"
+        );
     }
 
     /// Verify that an empty dependencies table also works.

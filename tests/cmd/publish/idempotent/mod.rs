@@ -1,5 +1,5 @@
-use predicates::prelude::*;
 use crate::{with_test_registry, VirtualFileSystem};
+use predicates::prelude::*;
 
 /// Test that publishing the same package twice succeeds (idempotent publish).
 /// The second publish should detect the existing artifact and skip the upload.
@@ -30,6 +30,9 @@ fn publish_twice_succeeds() {
             .current_dir(vfs.root())
             .assert()
             .success()
-            .stdout(predicate::str::contains("skipped").and(predicate::str::contains("already published")));
+            .stdout(
+                predicate::str::contains("skipped")
+                    .and(predicate::str::contains("already published")),
+            );
     });
 }
