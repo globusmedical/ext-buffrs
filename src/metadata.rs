@@ -359,68 +359,12 @@ fn build_cmake_targets(
     for id in graph.roots() {
         cmake.push_str(&format!("  \"{}@{}\"\n", id.name(), id.version()));
     }
-    cmake.push_str(")\n\n");
+    cmake.push_str(")\n");
 
-    // Emit helper function for link safety validation
-    cmake.push_str(
-        r#"# Validates link-unit safety for a target
-# Usage: buffrs_validate_link_unit(<target>)
-function(buffrs_validate_link_unit TARGET_NAME)
-  if(NOT TARGET ${TARGET_NAME})
-    message(FATAL_ERROR "buffrs_validate_link_unit: Target '${TARGET_NAME}' does not exist")
-  endif()
-
-  # Collect all linked targets recursively
-  set(_visited "")
-  set(_all_namespaces "")
-  _buffrs_collect_namespaces(${TARGET_NAME} _visited _all_namespaces)
-
-  # Check for duplicates (same namespace, different package@version)
-  list(LENGTH _all_namespaces _ns_count)
-  if(_ns_count GREATER 0)
-    list(REMOVE_DUPLICATES _all_namespaces)
-    list(LENGTH _all_namespaces _unique_count)
-    if(NOT _ns_count EQUAL _unique_count)
-      message(FATAL_ERROR "buffrs_validate_link_unit: Target '${TARGET_NAME}' has namespace conflicts. "
-        "Multiple packages declare the same protobuf namespace. "
-        "Check BUFFRS_PROTO_NAMESPACES properties on linked targets.")
-    endif()
-  endif()
-
-  message(STATUS "buffrs: Link-unit validation passed for ${TARGET_NAME}")
-endfunction()
-
-# Internal: Recursively collect namespaces from linked targets
-function(_buffrs_collect_namespaces TARGET_NAME VISITED_VAR NAMESPACES_VAR)
-  # Skip if already visited
-  list(FIND ${VISITED_VAR} ${TARGET_NAME} _idx)
-  if(NOT _idx EQUAL -1)
-    return()
-  endif()
-  list(APPEND ${VISITED_VAR} ${TARGET_NAME})
-  set(${VISITED_VAR} ${${VISITED_VAR}} PARENT_SCOPE)
-
-  # Get namespaces from this target
-  get_target_property(_ns ${TARGET_NAME} BUFFRS_PROTO_NAMESPACES)
-  if(_ns)
-    list(APPEND ${NAMESPACES_VAR} ${_ns})
-  endif()
-
-  # Recurse into linked libraries
-  get_target_property(_libs ${TARGET_NAME} LINK_LIBRARIES)
-  if(_libs)
-    foreach(_lib ${_libs})
-      if(TARGET ${_lib})
-        _buffrs_collect_namespaces(${_lib} ${VISITED_VAR} ${NAMESPACES_VAR})
-        set(${VISITED_VAR} ${${VISITED_VAR}} PARENT_SCOPE)
-      endif()
-    endforeach()
-  endif()
-
-  set(${NAMESPACES_VAR} ${${NAMESPACES_VAR}} PARENT_SCOPE)
-endfunction()
-"#,
-    );
+    // Note: Link-unit validation functions are intentionally NOT emitted here.
+    // Build systems should provide their own validation logic using the data above,
+    // as they have better visibility into the actual link graph across multiple
+    // Proto.toml resolutions. See BuffrsIntegration.cmake for an example.
 
     Ok(cmake)
 }
