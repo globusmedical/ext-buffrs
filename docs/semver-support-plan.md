@@ -313,21 +313,23 @@ The PubGrub SAT-based resolver is now fully integrated into the resolver pipelin
 | File                       | Changes                                        |
 | -------------------------- | ---------------------------------------------- |
 | `src/resolver.rs`          | Added `build_with_pubgrub()` method            |
-| `src/config.rs`            | Added `use_pubgrub` config option              |
+| `src/config.rs`            | Added `use_greedy_resolver` config option      |
 | `Cargo.toml`               | Added `pubgrub = "0.3"` dependency             |
 
-### Enabling PubGrub Resolution
+### Resolver Selection
 
-Add to `.buffrs/config.toml`:
+PubGrub is the default resolver.
+
+To opt into the legacy greedy resolver, add to `.buffrs/config.toml`:
 
 ```toml
 [resolver]
-use_pubgrub = true
+use_greedy_resolver = true
 ```
 
 ### How It Works
 
-When `use_pubgrub = true`, the resolver uses a three-phase approach:
+When using PubGrub, the resolver uses a three-phase approach:
 
 1. **Discovery Phase**: Fetches all available versions and their dependencies from registries
 2. **Resolution Phase**: Runs PubGrub algorithm to find consistent version assignments
@@ -361,11 +363,12 @@ pub fn resolve(provider: &BuffrsDependencyProvider) -> ResolutionResult;
 - **Diamond dependency resolution**: Successfully resolves conflicts that greedy fails
 - **Clear error messages**: Uses `DefaultStringReporter` for human-readable failures
 - **15 unit tests**: Covers version ranges, simple/transitive/diamond resolution, conflicts
-- **Automatic fallback**: Falls back to greedy for local dependencies (not yet supported)
+- **Automatic fallback**: Falls back to greedy when multi-version resolution is required
 
 ### Limitations
 
-- **Local dependencies**: When local dependencies are present, the resolver falls back to greedy
+- **Multi-version resolution**: PubGrub produces single-version solutions per package. If
+    multi-version resolution is required, buffrs falls back to greedy.
 - **Performance**: Discovery phase downloads all versions to get dependency metadata (can be slow)
 - **Network-heavy**: Requires fetching all package versions upfront
 

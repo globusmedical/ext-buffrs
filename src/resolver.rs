@@ -2,7 +2,7 @@ use async_recursion::async_recursion;
 use miette::{bail, ensure, Context, Diagnostic, IntoDiagnostic};
 use semver::{Version, VersionReq};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     env, fmt,
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
@@ -36,14 +36,17 @@ pub struct ResolvedPackageId {
 }
 
 impl ResolvedPackageId {
+    /// Creates a new resolved package identifier.
     pub fn new(name: PackageName, version: Version) -> Self {
         Self { name, version }
     }
 
+    /// Returns the package name for this resolved instance.
     pub fn name(&self) -> &PackageName {
         &self.name
     }
 
+    /// Returns the resolved package version for this instance.
     pub fn version(&self) -> &Version {
         &self.version
     }
@@ -205,6 +208,7 @@ struct DownloadError {
 }
 
 impl DependencyGraph {
+    /// Creates a new dependency graph.
     pub fn new(allow_multiple_versions: bool) -> Self {
         Self {
             allow_multiple_versions,
@@ -980,9 +984,14 @@ impl<'a> DependencyGraphBuilder<'a> {
 
         // Phase 1: Collect root dependencies and discover package metadata
         let mut root_deps = Vec::new();
-        let mut remote_deps_to_discover: Vec<(PackageName, RemoteDependencyManifest)> = Vec::new();
+        let mut remote_deps_to_discover: VecDeque<(PackageName, RemoteDependencyManifest)> =
+            VecDeque::new();
         let mut local_packages: HashMap<PackageName, (Package, PathBuf, LocalDependencyManifest)> =
             HashMap::new();
+
+        // Preferred versions for reproducible installs (from Proto.lock).
+        // Applied to the PubGrub provider as a soft preference.
+        let mut preferred_versions: HashMap<PackageName, Version> = HashMap::new();
 
         for dependency in &self.manifest.dependencies {
             match &dependency.manifest {
@@ -991,7 +1000,19 @@ impl<'a> DependencyGraphBuilder<'a> {
                         package: dependency.package.clone(),
                         version_req: manifest.version.clone(),
                     });
-                    remote_deps_to_discover.push((dependency.package.clone(), manifest.clone()));
+                    remote_deps_to_discover
+                        .push_back((dependency.package.clone(), manifest.clone()));
+
+                    if let Some(locked) = self.lockfile.find(
+                        &dependency.package,
+                        &manifest.version,
+                        Some(&manifest.registry),
+                        Some(&manifest.repository),
+                    ) {
+                        preferred_versions
+                            .entry(dependency.package.clone())
+                            .or_insert_with(|| locked.version.clone());
+                    }
                 }
                 DependencyManifest::Local(manifest) => {
                     // Read local package manifest to get its version
@@ -1049,7 +1070,18 @@ impl<'a> DependencyGraphBuilder<'a> {
                     for sub_dep in &package.manifest.dependencies {
                         if let DependencyManifest::Remote(sub_manifest) = &sub_dep.manifest {
                             remote_deps_to_discover
-                                .push((sub_dep.package.clone(), sub_manifest.clone()));
+                                .push_back((sub_dep.package.clone(), sub_manifest.clone()));
+
+                            if let Some(locked) = self.lockfile.find(
+                                &sub_dep.package,
+                                &sub_manifest.version,
+                                Some(&sub_manifest.registry),
+                                Some(&sub_manifest.repository),
+                            ) {
+                                preferred_versions
+                                    .entry(sub_dep.package.clone())
+                                    .or_insert_with(|| locked.version.clone());
+                            }
                         }
                     }
 
@@ -1064,6 +1096,10 @@ impl<'a> DependencyGraphBuilder<'a> {
         // Phase 2: Discover all remote packages and their metadata
         let provider = BuffrsDependencyProvider::new(root_deps);
         let mut discovered: HashSet<PackageName> = HashSet::new();
+
+        for (name, version) in preferred_versions {
+            provider.set_preferred_version(name, version);
+        }
 
         // Add local packages to provider first (they have exactly one version)
         for (name, (package, _, _)) in &local_packages {
@@ -1109,21 +1145,28 @@ impl<'a> DependencyGraphBuilder<'a> {
 
         // Discover remote packages
         while !remote_deps_to_discover.is_empty() {
-            let (pkg_name, manifest) = remote_deps_to_discover.remove(0);
+            let (pkg_name, manifest) = remote_deps_to_discover
+                .pop_front()
+                .expect("queue is non-empty");
 
             if discovered.contains(&pkg_name) {
                 continue;
             }
             discovered.insert(pkg_name.clone());
 
+            if let Some(locked) = self.lockfile.find(
+                &pkg_name,
+                &manifest.version,
+                Some(&manifest.registry),
+                Some(&manifest.repository),
+            ) {
+                provider.set_preferred_version(pkg_name.clone(), locked.version.clone());
+            }
+
             tracing::debug!("Discovering package: {}", pkg_name);
 
             // Create registry client
-            let registry = Artifactory::new(
-                manifest.registry.clone().try_into()?,
-                self.credentials,
-                self.policy,
-            )?;
+            let registry = self.create_artifactory(manifest.registry.clone().try_into()?)?;
 
             // Get all available versions
             let versions = registry
@@ -1160,7 +1203,7 @@ impl<'a> DependencyGraphBuilder<'a> {
                                     // Add to discovery queue
                                     if !discovered.contains(&dep.package) {
                                         remote_deps_to_discover
-                                            .push((dep.package.clone(), dep_manifest.clone()));
+                                            .push_back((dep.package.clone(), dep_manifest.clone()));
                                     }
                                 }
                                 DependencyManifest::Local(dep_manifest) => {
@@ -1234,11 +1277,8 @@ impl<'a> DependencyGraphBuilder<'a> {
                     })?;
 
                     // Download the resolved version
-                    let registry = Artifactory::new(
-                        manifest.registry.clone().try_into()?,
-                        self.credentials,
-                        self.policy,
-                    )?;
+                    let registry =
+                        self.create_artifactory(manifest.registry.clone().try_into()?)?;
 
                     let package = registry
                         .download_version(
@@ -1257,13 +1297,7 @@ impl<'a> DependencyGraphBuilder<'a> {
 
                     // Process sub-dependencies recursively
                     let sub_dep_ids = self
-                        .build_pubgrub_subdeps(
-                            &package,
-                            &resolved,
-                            &local_packages,
-                            &mut deps,
-                            &parent_dir,
-                        )
+                        .build_pubgrub_subdeps(&package, &resolved, &local_packages, &mut deps)
                         .await?;
 
                     deps.insert(
@@ -1295,13 +1329,7 @@ impl<'a> DependencyGraphBuilder<'a> {
 
                     // Process sub-dependencies recursively
                     let sub_dep_ids = self
-                        .build_pubgrub_subdeps(
-                            package,
-                            &resolved,
-                            &local_packages,
-                            &mut deps,
-                            &parent_dir,
-                        )
+                        .build_pubgrub_subdeps(package, &resolved, &local_packages, &mut deps)
                         .await?;
 
                     // Extract multiversion settings
@@ -1348,7 +1376,6 @@ impl<'a> DependencyGraphBuilder<'a> {
         resolved: &HashMap<PackageName, Version>,
         local_packages: &HashMap<PackageName, (Package, PathBuf, LocalDependencyManifest)>,
         deps: &mut DependencyGraph,
-        parent_dir: &Path,
     ) -> miette::Result<Vec<ResolvedPackageId>> {
         let mut sub_dep_ids = Vec::new();
 
@@ -1380,11 +1407,8 @@ impl<'a> DependencyGraphBuilder<'a> {
                     }
 
                     // Download the resolved version
-                    let registry = Artifactory::new(
-                        manifest.registry.clone().try_into()?,
-                        self.credentials,
-                        self.policy,
-                    )?;
+                    let registry =
+                        self.create_artifactory(manifest.registry.clone().try_into()?)?;
 
                     let sub_package = registry
                         .download_version(&manifest.repository, &sub_dep.package, resolved_version)
@@ -1396,13 +1420,7 @@ impl<'a> DependencyGraphBuilder<'a> {
 
                     // Recursively process its dependencies
                     let nested_ids = self
-                        .build_pubgrub_subdeps(
-                            &sub_package,
-                            resolved,
-                            local_packages,
-                            deps,
-                            parent_dir,
-                        )
+                        .build_pubgrub_subdeps(&sub_package, resolved, local_packages, deps)
                         .await?;
 
                     deps.insert(
@@ -1461,13 +1479,7 @@ impl<'a> DependencyGraphBuilder<'a> {
 
                         // Recursively process its dependencies
                         let nested_ids = self
-                            .build_pubgrub_subdeps(
-                                local_pkg,
-                                resolved,
-                                local_packages,
-                                deps,
-                                parent_dir,
-                            )
+                            .build_pubgrub_subdeps(local_pkg, resolved, local_packages, deps)
                             .await?;
 
                         let allows_multiversion = manifest

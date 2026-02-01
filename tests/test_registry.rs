@@ -99,10 +99,7 @@ async fn get_package(
 }
 
 /// HEAD handler: returns 200 if artifact exists, 404 otherwise (no body)
-async fn head_package(
-    extract::State(state): extract::State<State>,
-    extract::Path(path): extract::Path<String>,
-) -> StatusCode {
+async fn head_package(State(state): State<AppState>, Path(path): Path<String>) -> StatusCode {
     tracing::info!("HEAD check for {path}");
     if state.read().unwrap().contains_key(&path) {
         StatusCode::OK

@@ -233,6 +233,11 @@ pub struct BuffrsDependencyProvider {
     packages: Arc<RwLock<HashMap<PackageName, PackageInfo>>>,
     /// Root package dependencies
     root_deps: Vec<PackageDependency>,
+    /// Preferred versions for reproducible installs (e.g., from Proto.lock).
+    ///
+    /// If a preferred version satisfies all constraints, it will be chosen even
+    /// if a higher version exists.
+    preferred_versions: Arc<RwLock<HashMap<PackageName, Version>>>,
 }
 
 impl BuffrsDependencyProvider {
@@ -241,6 +246,7 @@ impl BuffrsDependencyProvider {
         Self {
             packages: Arc::new(RwLock::new(HashMap::new())),
             root_deps,
+            preferred_versions: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -248,6 +254,14 @@ impl BuffrsDependencyProvider {
     pub fn add_package(&self, name: PackageName, info: PackageInfo) {
         let mut packages = self.packages.write().unwrap();
         packages.insert(name, info);
+    }
+
+    /// Sets a preferred version for a package.
+    ///
+    /// This is typically used to prefer versions pinned in `Proto.lock`.
+    pub fn set_preferred_version(&self, name: PackageName, version: Version) {
+        let mut preferred = self.preferred_versions.write().unwrap();
+        preferred.insert(name, version);
     }
 
     /// Gets the available versions for a package.
@@ -278,13 +292,31 @@ impl DependencyProvider for BuffrsDependencyProvider {
             PubGrubPackage::Package(name) => {
                 let packages = self.packages.read().unwrap();
                 if let Some(info) = packages.get(name) {
-                    // Find the highest version that matches the range
+                    // Prefer lockfile-pinned versions for reproducibility when compatible.
+                    // If dependency metadata is missing for a version, `get_dependencies` will
+                    // treat it as having no dependencies (current behavior). When metadata is
+                    // available for at least some versions, prefer versions we have metadata for.
+                    if let Some(preferred) = self.preferred_versions.read().unwrap().get(name) {
+                        let has_metadata = info.dependencies.is_empty()
+                            || info.dependencies.contains_key(preferred);
+                        if range.contains(preferred) && has_metadata {
+                            return Ok(Some(preferred.clone()));
+                        }
+                    }
+
+                    // Fall back to the highest version that matches the range.
+                    // When dependency metadata exists, restrict to versions we have metadata for.
                     let matching = info
                         .versions
                         .iter()
-                        .filter(|v| range.contains(v))
+                        .filter(|v| {
+                            range.contains(v)
+                                && (info.dependencies.is_empty()
+                                    || info.dependencies.contains_key(*v))
+                        })
                         .max()
                         .cloned();
+
                     Ok(matching)
                 } else {
                     Ok(None)
@@ -306,7 +338,16 @@ impl DependencyProvider for BuffrsDependencyProvider {
             PubGrubPackage::Package(name) => {
                 let packages = self.packages.read().unwrap();
                 if let Some(info) = packages.get(name) {
-                    let count = info.versions.iter().filter(|v| range.contains(v)).count();
+                    // Prioritize based on viable versions (those with dependency metadata).
+                    let count = info
+                        .versions
+                        .iter()
+                        .filter(|v| {
+                            range.contains(v)
+                                && (info.dependencies.is_empty()
+                                    || info.dependencies.contains_key(*v))
+                        })
+                        .count();
                     // Fewer versions = higher priority (prioritize most constrained)
                     u32::MAX - count as u32
                 } else {

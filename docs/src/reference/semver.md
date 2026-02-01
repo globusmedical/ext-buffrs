@@ -97,7 +97,9 @@ When installing dependencies, buffrs:
 2. Selects the highest version that satisfies the requirement
 3. Records the exact resolved version in `Proto.lock`
 
-Future installs use the locked version for reproducibility.
+Future installs prefer the locked version for reproducibility when it is still compatible
+with all version constraints. If it is no longer compatible, buffrs resolves a new version
+and updates `Proto.lock`.
 
 ## Multi-version Resolution
 

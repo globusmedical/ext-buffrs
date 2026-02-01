@@ -422,12 +422,14 @@ async fn rewrite_proto_namespaces_in_dir(dir: &Path, version: &Version) -> miett
             // On Windows, files extracted from tar may be read-only. Make writable before writing.
             #[cfg(windows)]
             {
-                let mut perms = std::fs::metadata(&path)
+                let mut perms = tokio::fs::metadata(&path)
+                    .await
                     .into_diagnostic()
                     .wrap_err(miette!("failed to get metadata for {}", path.display()))?
                     .permissions();
                 perms.set_readonly(false);
-                std::fs::set_permissions(&path, perms)
+                tokio::fs::set_permissions(&path, perms)
+                    .await
                     .into_diagnostic()
                     .wrap_err(miette!("failed to set permissions for {}", path.display()))?;
             }
