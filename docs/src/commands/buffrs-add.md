@@ -34,6 +34,22 @@ Currently there is no support for resolving version operators but the specific
 version has to be provided. This means `^1.0.0`, `<2.3.0`, `~2.0.0`, etc. can't
 be installed, but `=1.2.3` has to be provided.
 
+### Options
+
+#### `--resolver <RESOLVER>`
+
+Specify the dependency resolver strategy:
+
+- `default` - Standard single-version resolution (default)
+- `multiversion` - Allow multiple versions of this package to coexist
+
+Use `multiversion` when you need different parts of your codebase to depend on
+different versions of the same package. See [Multi-Version Dependencies](../guide/multi-version-dependencies.md) for details.
+
+```bash
+buffrs add --registry <REGISTRY> --resolver multiversion <DEPENDENCY>
+```
+
 #### Lockfile interaction
 
 Currently adding a new dependency won't automatically update the lockfile

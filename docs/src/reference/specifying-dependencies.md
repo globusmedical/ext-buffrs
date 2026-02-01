@@ -114,7 +114,9 @@ When using multi-version, control namespace collision behavior:
 [dependencies.lib-algo-base]
 version = "=0.1.2"
 resolver = "multiversion"
-namespace_overlap = "forbidden"     # Default
-# namespace_overlap = "identical_only"
-# namespace_overlap = "allowed"
+namespace_overlap = "rewrite"        # Default - auto-rewrite package names
+# namespace_overlap = "identical_only" # Allow only if content is identical
+# namespace_overlap = "forbidden"      # Fail on any overlap
 ```
+
+See [Multi-Version Dependencies](../guide/multi-version-dependencies.md) for details on namespace rewriting.
