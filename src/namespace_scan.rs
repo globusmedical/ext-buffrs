@@ -23,6 +23,8 @@
 //! 2. Metadata emission: Generating `namespaces.json` for CMake integration to
 //!    validate link-unit safety at build time.
 //! 3. Content identity: Computing content hashes for `identical_only` policy support.
+//! 4. Namespace rewriting: Modifying package declarations to include version suffixes
+//!    for safe multi-version coexistence.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -281,6 +283,159 @@ pub async fn scan_dependency_graph(
     Ok(result)
 }
 
+/// Converts a semver Version to a namespace suffix.
+///
+/// The suffix format is `_v<major>_<minor>_<patch>` with any pre-release identifiers
+/// appended after replacing non-alphanumeric characters with underscores.
+///
+/// # Examples
+/// - `0.1.2` → `_v0_1_2`
+/// - `0.1.2-SPINE-4384` → `_v0_1_2_SPINE_4384`
+/// - `1.0.0-rc.1` → `_v1_0_0_rc_1`
+pub fn version_to_suffix(version: &Version) -> String {
+    let mut suffix = format!("_v{}_{}", version.major, version.minor);
+
+    // Only add patch if non-zero or if there's pre-release
+    if version.patch > 0 || !version.pre.is_empty() {
+        suffix.push_str(&format!("_{}", version.patch));
+    }
+
+    // Add pre-release identifiers
+    if !version.pre.is_empty() {
+        let pre_str = version.pre.to_string();
+        // Replace non-alphanumeric chars with underscores
+        let sanitized: String = pre_str
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '_' })
+            .collect();
+        suffix.push('_');
+        suffix.push_str(&sanitized);
+    }
+
+    suffix
+}
+
+/// Rewrites the protobuf `package` declaration in file contents to include a version suffix.
+///
+/// This is used for multi-version support where multiple versions of the same package
+/// need to coexist with unique namespaces.
+///
+/// # Arguments
+/// * `contents` - The original proto file contents
+/// * `version` - The package version to append as a suffix
+///
+/// # Returns
+/// The rewritten contents with the versioned package declaration, or the original
+/// contents if no package declaration was found.
+///
+/// # Example
+/// ```ignore
+/// let contents = "package gm.algo.base;";
+/// let version = Version::parse("0.1.2").unwrap();
+/// let rewritten = rewrite_proto_package(contents, &version);
+/// assert!(rewritten.contains("package gm.algo.base._v0_1_2;"));
+/// ```
+pub fn rewrite_proto_package(contents: &str, version: &Version) -> String {
+    let suffix = version_to_suffix(version);
+
+    // Find the package declaration and rewrite it
+    // We need to handle the full structure: `package <name>;`
+    let mut result = String::with_capacity(contents.len() + suffix.len());
+    let mut chars = contents.chars().peekable();
+    let mut in_block_comment = false;
+    let mut found_package = false;
+
+    while let Some(c) = chars.next() {
+        // Handle block comments
+        if in_block_comment {
+            result.push(c);
+            if c == '*' {
+                if let Some('/') = chars.peek().copied() {
+                    result.push(chars.next().unwrap());
+                    in_block_comment = false;
+                }
+            }
+            continue;
+        }
+
+        // Handle comment starts
+        if c == '/' {
+            match chars.peek().copied() {
+                Some('/') => {
+                    // Line comment - copy until newline
+                    result.push(c);
+                    result.push(chars.next().unwrap());
+                    while let Some(nc) = chars.next() {
+                        result.push(nc);
+                        if nc == '\n' {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                Some('*') => {
+                    // Block comment
+                    result.push(c);
+                    result.push(chars.next().unwrap());
+                    in_block_comment = true;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+
+        // Look for 'package' keyword (only if we haven't found one yet)
+        if !found_package && c == 'p' {
+            // Check if this starts "package"
+            let remaining: String = chars.clone().take(6).collect();
+            if remaining == "ackage" {
+                // Verify it's a keyword boundary (not part of another word)
+                let peek_after: String = chars.clone().skip(6).take(1).collect();
+                if peek_after.chars().next().map_or(true, |ch| {
+                    ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r'
+                }) {
+                    // Found the package keyword
+                    result.push(c);
+                    for _ in 0..6 {
+                        result.push(chars.next().unwrap());
+                    }
+
+                    // Skip whitespace
+                    while let Some(&ws) = chars.peek() {
+                        if ws == ' ' || ws == '\t' || ws == '\n' || ws == '\r' {
+                            result.push(chars.next().unwrap());
+                        } else {
+                            break;
+                        }
+                    }
+
+                    // Collect the package name
+                    let mut pkg_name = String::new();
+                    while let Some(&ch) = chars.peek() {
+                        if ch.is_alphanumeric() || ch == '_' || ch == '.' {
+                            pkg_name.push(chars.next().unwrap());
+                        } else {
+                            break;
+                        }
+                    }
+
+                    // Write the rewritten package name with version suffix
+                    // Add a dot before the version suffix to create a new namespace segment
+                    result.push_str(&pkg_name);
+                    result.push('.');
+                    result.push_str(&suffix);
+                    found_package = true;
+                    continue;
+                }
+            }
+        }
+
+        result.push(c);
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,5 +505,95 @@ package real.package.v1;
             extract_proto_package(contents),
             Some("real.package.v1".to_string())
         );
+    }
+
+    #[test]
+    fn test_version_to_suffix_simple() {
+        use semver::Version;
+        assert_eq!(version_to_suffix(&Version::new(0, 1, 2)), "_v0_1_2");
+        assert_eq!(version_to_suffix(&Version::new(1, 0, 0)), "_v1_0");
+        assert_eq!(version_to_suffix(&Version::new(2, 3, 4)), "_v2_3_4");
+    }
+
+    #[test]
+    fn test_version_to_suffix_with_prerelease() {
+        use semver::Version;
+        let v = Version::parse("0.1.2-SPINE-4384").unwrap();
+        assert_eq!(version_to_suffix(&v), "_v0_1_2_SPINE_4384");
+
+        let v = Version::parse("1.0.0-rc.1").unwrap();
+        assert_eq!(version_to_suffix(&v), "_v1_0_0_rc_1");
+
+        let v = Version::parse("0.1.0-alpha").unwrap();
+        assert_eq!(version_to_suffix(&v), "_v0_1_0_alpha");
+    }
+
+    #[test]
+    fn test_rewrite_proto_package_simple() {
+        use semver::Version;
+        let contents = r#"
+syntax = "proto3";
+package gm.algo.base;
+
+message Foo {}
+"#;
+        let version = Version::new(0, 1, 2);
+        let rewritten = rewrite_proto_package(contents, &version);
+        assert!(rewritten.contains("package gm.algo.base._v0_1_2;"));
+        assert!(!rewritten.contains("package gm.algo.base;"));
+    }
+
+    #[test]
+    fn test_rewrite_proto_package_with_comments() {
+        use semver::Version;
+        let contents = r#"
+// This is a comment
+syntax = "proto3";
+/* Block comment */
+package api.service.v2;
+
+// Another comment
+message Bar {}
+"#;
+        let version = Version::new(1, 0, 0);
+        let rewritten = rewrite_proto_package(contents, &version);
+        assert!(rewritten.contains("package api.service.v2._v1_0;"));
+    }
+
+    #[test]
+    fn test_rewrite_proto_package_preserves_structure() {
+        use semver::Version;
+        let contents = r#"syntax = "proto3";
+
+// Package declaration
+package my.package;
+
+message Test {
+  string name = 1;
+}
+"#;
+        let version = Version::parse("2.0.0-beta").unwrap();
+        let rewritten = rewrite_proto_package(contents, &version);
+
+        // Check that rewriting happened correctly
+        assert!(rewritten.contains("package my.package._v2_0_0_beta;"));
+        // Check that comments are preserved
+        assert!(rewritten.contains("// Package declaration"));
+        // Check that message is preserved
+        assert!(rewritten.contains("message Test"));
+    }
+
+    #[test]
+    fn test_rewrite_proto_package_no_package() {
+        use semver::Version;
+        let contents = r#"
+syntax = "proto3";
+
+message Foo {}
+"#;
+        let version = Version::new(0, 1, 2);
+        let rewritten = rewrite_proto_package(contents, &version);
+        // No package declaration, so content should be mostly unchanged
+        assert!(!rewritten.contains("_v0_1_2"));
     }
 }

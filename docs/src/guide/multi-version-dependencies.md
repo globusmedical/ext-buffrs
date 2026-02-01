@@ -32,15 +32,16 @@ This grants *permission* for buffrs to resolve multiple versions of `lib-algo-ba
 
 Generated C++ code paths and namespaces come from the `package` declarations inside `.proto` files (e.g., `package gm.algo.base.v1;`), **not** from vendor directory names. This means:
 
-| Scenario | C++ Code Changes? | Reason |
-|----------|-------------------|--------|
-| Same namespace, identical content | No | Files are identical |
-| Same namespace, different content | N/A | Build fails (`namespace_overlap = "forbidden"`) |
-| Versioned namespaces (v1 vs v2) | Maybe | Different C++ namespaces; update includes if switching versions |
+| Scenario                          | C++ Code Changes? | Reason                                                          |
+| --------------------------------- | ----------------- | --------------------------------------------------------------- |
+| Same namespace, identical content | No                | Files are identical                                             |
+| Same namespace, different content | N/A               | Build fails (`namespace_overlap = "forbidden"`)                 |
+| Versioned namespaces (v1 vs v2)   | Maybe             | Different C++ namespaces; update includes if switching versions |
 
 The vendor directory layout (`lib-algo-base@0.1.2/` vs `lib-algo-base@0.1.3/`) is an implementation detail that does not affect your `#include` statements or C++ namespace usage.
 
 **When C++ code might need changes:**
+
 - If you explicitly set `namespace_overlap = "allowed"` with different proto content, you risk ODR (One Definition Rule) violations at link time. This is strongly discouraged.
 - If you're migrating from one API version to another (e.g., `v1` → `v2`), you'll update your code to use the new namespace regardless of multi-version resolution.
 
@@ -104,6 +105,7 @@ namespace_overlap = "allowed"
 1. **Use sparingly**: Multi-version should be the exception, not the rule. Prefer updating all consumers to a single version when possible.
 
 2. **Version your proto namespaces**: If you need multiple API versions to coexist safely, consider versioning your protobuf `package` declarations:
+
    ```protobuf
    // v1
    package mycompany.api.v1;

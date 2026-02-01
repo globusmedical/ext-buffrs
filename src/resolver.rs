@@ -256,20 +256,42 @@ impl DependencyGraph {
     /// Update namespace policy for a package name (most permissive wins).
     pub fn update_namespace_policy(&mut self, name: &PackageName, policy: NamespaceOverlapPolicy) {
         let current = self.namespace_policies.entry(name.clone()).or_default();
-        // Most permissive wins: Allowed > IdenticalOnly > Forbidden
+        // Most permissive wins: Rewrite > IdenticalOnly > Forbidden
         let new_permissiveness = match policy {
-            NamespaceOverlapPolicy::Allowed => 2,
+            NamespaceOverlapPolicy::Rewrite => 2,
             NamespaceOverlapPolicy::IdenticalOnly => 1,
             NamespaceOverlapPolicy::Forbidden => 0,
         };
         let current_permissiveness = match *current {
-            NamespaceOverlapPolicy::Allowed => 2,
+            NamespaceOverlapPolicy::Rewrite => 2,
             NamespaceOverlapPolicy::IdenticalOnly => 1,
             NamespaceOverlapPolicy::Forbidden => 0,
         };
         if new_permissiveness > current_permissiveness {
             *current = policy;
         }
+    }
+
+    /// Returns true if the package needs namespace rewriting due to multi-version resolution.
+    ///
+    /// A package needs rewriting if:
+    /// 1. Multiple versions of this package name exist in the graph, AND
+    /// 2. The namespace_overlap policy is `Rewrite` (default)
+    pub fn needs_namespace_rewrite(&self, id: &ResolvedPackageId) -> bool {
+        // Check if multiple versions exist
+        let versions_count = self
+            .entries
+            .keys()
+            .filter(|k| k.name() == id.name())
+            .count();
+
+        if versions_count <= 1 {
+            return false;
+        }
+
+        // Check the namespace policy
+        let policy = self.namespace_policy(id.name());
+        matches!(policy, NamespaceOverlapPolicy::Rewrite)
     }
 
     /// Returns a list of vendor module directory names used by this graph.

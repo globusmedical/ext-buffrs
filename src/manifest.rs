@@ -680,13 +680,14 @@ pub enum ResolverMode {
 #[derive(Debug, Clone, Copy, Hash, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum NamespaceOverlapPolicy {
-    /// Default: fail if two versions declare the same namespace
+    /// Default: rewrite proto package declarations to include version suffix
+    /// This ensures safe multi-version coexistence by generating unique namespaces.
     #[default]
-    Forbidden,
-    /// Allow overlap only if proto file content hashes match
+    Rewrite,
+    /// Allow overlap only if proto file content hashes match (no rewriting needed)
     IdenticalOnly,
-    /// Allow overlap (dangerous - explicit hazard acknowledgment)
-    Allowed,
+    /// Fail if two versions declare the same namespace (legacy behavior)
+    Forbidden,
 }
 
 /// Manifest format for dependencies
@@ -711,7 +712,7 @@ fn is_default_resolver(mode: &ResolverMode) -> bool {
 }
 
 fn is_default_namespace_policy(policy: &NamespaceOverlapPolicy) -> bool {
-    matches!(policy, NamespaceOverlapPolicy::Forbidden)
+    matches!(policy, NamespaceOverlapPolicy::Rewrite)
 }
 
 impl From<RemoteDependencyManifest> for DependencyManifest {

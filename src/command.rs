@@ -389,6 +389,43 @@ pub enum GenerationOption {
     BufYaml,
 }
 
+/// Rewrites proto package declarations in all .proto files in a directory.
+///
+/// This adds a version suffix to the package declarations to enable safe
+/// multi-version coexistence. For example:
+/// - `package gm.algo.base;` becomes `package gm.algo.base._v0_1_2;`
+///
+/// # Arguments
+/// * `dir` - Directory containing .proto files to rewrite
+/// * `version` - Version to use for the suffix
+async fn rewrite_proto_namespaces_in_dir(dir: &Path, version: &Version) -> miette::Result<()> {
+    use walkdir::WalkDir;
+
+    for entry in WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().map_or(false, |ext| ext == "proto"))
+    {
+        let path = entry.path();
+        let contents = tokio::fs::read_to_string(path)
+            .await
+            .into_diagnostic()
+            .wrap_err(miette!("failed to read proto file {}", path.display()))?;
+
+        let rewritten = namespace_scan::rewrite_proto_package(&contents, version);
+
+        // Only write if content changed
+        if rewritten != contents {
+            tokio::fs::write(path, rewritten)
+                .await
+                .into_diagnostic()
+                .wrap_err(miette!("failed to write proto file {}", path.display()))?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Installs dependencies
 ///
 /// # Arguments
@@ -459,6 +496,18 @@ pub async fn install(
                 "failed to unpack package {}",
                 &resolved.package().name()
             ))?;
+
+        // Rewrite proto namespaces if multi-version and policy is Rewrite
+        if graph.needs_namespace_rewrite(id) {
+            let pkg_dir = store.locate_resolved(id, graph);
+            rewrite_proto_namespaces_in_dir(&pkg_dir, id.version()).await?;
+            tracing::info!(
+                "{} rewrote namespaces for {}@{} (multi-version)",
+                if prefix.is_empty() { "::" } else { &prefix },
+                id.name(),
+                id.version()
+            );
+        }
 
         tracing::info!(
             "{} installed {}@{}",
@@ -615,10 +664,11 @@ pub async fn install(
                         let other_policy = graph.namespace_policy(other_id.name());
 
                         // Use the most permissive policy between the two
+                        // Rewrite is default and should have already disambiguated, but we check anyway
                         let effective_policy = match (&policy, &other_policy) {
-                            (NamespaceOverlapPolicy::Allowed, _)
-                            | (_, NamespaceOverlapPolicy::Allowed) => {
-                                NamespaceOverlapPolicy::Allowed
+                            (NamespaceOverlapPolicy::Rewrite, _)
+                            | (_, NamespaceOverlapPolicy::Rewrite) => {
+                                NamespaceOverlapPolicy::Rewrite
                             }
                             (NamespaceOverlapPolicy::IdenticalOnly, _)
                             | (_, NamespaceOverlapPolicy::IdenticalOnly) => {
@@ -628,13 +678,24 @@ pub async fn install(
                         };
 
                         match effective_policy {
-                            NamespaceOverlapPolicy::Allowed => {
-                                tracing::warn!(
-                                    ":: namespace overlap allowed: '{}' declared by {} and {}",
-                                    pkg,
-                                    other_id,
-                                    id
-                                );
+                            NamespaceOverlapPolicy::Rewrite => {
+                                // With Rewrite policy, namespaces should have been rewritten during install.
+                                // A collision here means rewriting didn't apply or these are shared types.
+                                // Check if content is identical (shared base types are OK).
+                                if &content_hash != other_hash {
+                                    tracing::warn!(
+                                        ":: namespace collision after rewrite: '{}' declared by {} and {} with different content",
+                                        pkg, other_id, id
+                                    );
+                                    tracing::warn!(
+                                        "   This may indicate a bug in namespace rewriting or incompatible shared types"
+                                    );
+                                } else {
+                                    tracing::debug!(
+                                        ":: namespace overlap (identical content): '{}' in {} and {}",
+                                        pkg, other_id, id
+                                    );
+                                }
                             }
                             NamespaceOverlapPolicy::IdenticalOnly => {
                                 // DR-BUFFRS-1520: Check content identity
@@ -645,7 +706,7 @@ pub async fn install(
                                          - {} (e.g. {}) hash: {}...\n\
                                          \n\
                                          The `identical_only` policy requires identical proto file contents.\n\
-                                         Use `namespace_overlap = \"allowed\"` to override (dangerous).",
+                                         Consider using the default `rewrite` policy to auto-disambiguate namespaces.",
                                         pkg,
                                         other_id, other_file.display(), &other_hash[..16],
                                         id, proto.display(), &content_hash[..16]
@@ -661,8 +722,8 @@ pub async fn install(
                                     "multi-version install is not link-safe: protobuf package namespace '{}' is declared by both {} (e.g. {}) and {} (e.g. {})\n\
                                      \n\
                                      Options:\n\
+                                     - Use the default `rewrite` policy to auto-disambiguate namespaces\n\
                                      - Add `namespace_overlap = \"identical_only\"` if content is the same\n\
-                                     - Add `namespace_overlap = \"allowed\"` to override (dangerous)\n\
                                      - Restructure dependencies to avoid the collision",
                                     pkg,
                                     other_id, other_file.display(),
