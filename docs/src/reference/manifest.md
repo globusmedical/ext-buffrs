@@ -84,7 +84,7 @@ version = "=0.1.2"
 repository = "algo"
 registry = "https://registry.example.com"
 resolver = "multiversion"           # Allow multiple versions
-namespace_overlap = "forbidden"     # Default: fail on namespace collision
+namespace_overlap = "forbidden"     # Fail on namespace collision (default: rewrite)
 ```
 
 ### `resolver` Values
