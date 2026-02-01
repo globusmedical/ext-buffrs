@@ -12,15 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use miette::{ensure, Context, IntoDiagnostic};
+use miette::{ensure, miette, Context, IntoDiagnostic};
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use thiserror::Error;
 use tokio::fs;
 use url::Url;
 
 use crate::{
     errors::{DeserializationError, FileExistsError, FileNotFound, SerializationError, WriteError},
+    io::File,
     package::{Package, PackageName},
     registry::{RegistryRef, RegistryUri},
     ManagedFile,
@@ -308,6 +310,74 @@ impl FromIterator<LockedPackage> for Lockfile {
         Self {
             packages: iter.into_iter().collect(),
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl File for Lockfile {
+    const DEFAULT_PATH: &'static str = LOCKFILE;
+
+    async fn load_from<P>(path: P) -> miette::Result<Self>
+    where
+        P: AsRef<Path> + Send + Sync,
+    {
+        let path_str = path.as_ref().to_string_lossy().to_string();
+        let contents = fs::read_to_string(path.as_ref()).await;
+        match contents {
+            Ok(contents) => {
+                let raw: RawLockfile = toml::from_str(&contents)
+                    .into_diagnostic()
+                    .wrap_err(DeserializationError(ManagedFile::Lock))?;
+                Ok(Self::from_iter(raw.packages.into_iter()))
+            }
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::NotFound) => {
+                Err(FileNotFound(path_str).into())
+            }
+            Err(err) => Err(err).into_diagnostic(),
+        }
+    }
+
+    async fn save<P>(&self, path: P) -> miette::Result<()>
+    where
+        P: AsRef<Path> + Send + Sync,
+    {
+        let path_str = path.as_ref().to_string_lossy().to_string();
+
+        let mut packages: Vec<_> = self
+            .packages
+            .iter()
+            .map(|pkg| {
+                let mut locked = pkg.clone();
+                locked.dependencies.sort();
+                locked.dependencies_resolved.sort();
+                locked
+            })
+            .collect();
+
+        packages.sort();
+
+        let raw = RawLockfile {
+            version: 1,
+            packages,
+        };
+
+        let new_content = toml::to_string(&raw)
+            .into_diagnostic()
+            .wrap_err(SerializationError(ManagedFile::Lock))?;
+
+        // Check if file exists and content is unchanged
+        if let Ok(existing_content) = fs::read_to_string(path.as_ref()).await {
+            if existing_content == new_content {
+                // Content unchanged - skip write to preserve timestamp
+                return Ok(());
+            }
+        }
+
+        // Content changed or file doesn't exist - write it
+        fs::write(path.as_ref(), new_content.into_bytes())
+            .await
+            .into_diagnostic()
+            .wrap_err(miette!("failed to write lockfile to {}", path_str))
     }
 }
 

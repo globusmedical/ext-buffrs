@@ -15,9 +15,11 @@
 use std::{
     collections::BTreeMap,
     env::current_dir,
+    fs::Metadata,
     path::{Path, PathBuf},
 };
 
+use bytes::Bytes;
 use miette::{bail, ensure, miette, Context, IntoDiagnostic};
 use tokio::fs;
 use walkdir::WalkDir;
@@ -28,6 +30,17 @@ use crate::{
     package::{Package, PackageName, PackageType},
     resolver::{DependencyGraph, ResolvedPackageId},
 };
+
+/// A file entry for package creation, containing content and optional metadata.
+///
+/// Used during package creation to optionally preserve filesystem metadata
+/// like modification times in the resulting tarball.
+pub struct Entry {
+    /// Actual bytes of the file
+    pub contents: Bytes,
+    /// File metadata (for mtime, etc.)
+    pub metadata: Option<Metadata>,
+}
 
 /// IO abstraction layer over local `buffrs` package store
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,6 +209,7 @@ impl PackageStore {
     /// - `manifest` - Package manifest to package
     /// - `config` - Configuration to use (for alias resolution)
     /// - `deps` - Optional dependency graph to fetch dependencies from
+    /// - `preserve_mtime` - If `true`, preserves modification times of files in the tarball
     ///
     /// # Returns
     /// A `Package` instance representing the packaged release
@@ -204,6 +218,7 @@ impl PackageStore {
         manifest: &Manifest,
         config: &Config,
         deps: Option<&DependencyGraph>,
+        preserve_mtime: bool,
     ) -> miette::Result<Package> {
         for dependency in manifest.dependencies.iter() {
             let resolved = if let Some(deps) = deps {
@@ -235,10 +250,17 @@ impl PackageStore {
         for entry in self.collect(&pkg_path, false).await {
             let path = entry.strip_prefix(&pkg_path).into_diagnostic()?;
             let contents = tokio::fs::read(&entry).await.unwrap();
-            entries.insert(path.into(), contents.into());
+
+            entries.insert(
+                path.into(),
+                Entry {
+                    contents: contents.into(),
+                    metadata: tokio::fs::metadata(&entry).await.ok(),
+                },
+            );
         }
 
-        let package = Package::create(manifest.clone(), entries)?;
+        let package = Package::create(manifest.clone(), entries, preserve_mtime)?;
 
         tracing::info!(":: packaged {}@{}", package.name(), package.version());
 

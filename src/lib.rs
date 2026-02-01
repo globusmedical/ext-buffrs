@@ -31,6 +31,8 @@ pub mod credentials;
 pub mod errors;
 /// Integration with external tools
 pub mod integration;
+/// IO traits
+pub mod io;
 /// Lockfile implementation
 pub mod lock;
 /// Manifest format and IO

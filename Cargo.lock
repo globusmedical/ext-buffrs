@@ -290,6 +290,7 @@ dependencies = [
  "assert_cmd",
  "assert_fs",
  "async-recursion",
+ "async-trait",
  "axum",
  "bytes",
  "clap",

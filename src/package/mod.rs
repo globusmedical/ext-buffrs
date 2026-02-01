@@ -17,4 +17,9 @@ mod name;
 mod store;
 mod r#type;
 
-pub use self::{compressed::Package, name::PackageName, r#type::PackageType, store::PackageStore};
+pub use self::{
+    compressed::Package,
+    name::PackageName,
+    r#type::PackageType,
+    store::{Entry, PackageStore},
+};

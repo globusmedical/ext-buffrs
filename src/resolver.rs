@@ -532,7 +532,7 @@ impl<'a> DependencyGraphBuilder<'a> {
         // Process sub-dependencies first
         let package = if is_root {
             let store = PackageStore::open(&abs_manifest_dir).await?;
-            let package = store.release(&manifest, self.config, Some(deps)).await?;
+            let package = store.release(&manifest, self.config, Some(deps), false).await?;
 
             // Ensure that the package version doesn't clash with an existing entry,
             // and that it matches the version requirement in the manifest
@@ -1048,7 +1048,7 @@ impl<'a> DependencyGraphBuilder<'a> {
                     let store = PackageStore::open(&abs_manifest_dir).await?;
                     let mut temp_deps = DependencyGraph::new(self.config.allow_multiple_versions());
                     let package = store
-                        .release(&local_manifest, self.config, Some(&mut temp_deps))
+                        .release(&local_manifest, self.config, Some(&mut temp_deps), false)
                         .await?;
 
                     let version = package.version().clone();
