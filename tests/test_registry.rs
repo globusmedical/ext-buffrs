@@ -20,7 +20,7 @@ type State = Arc<RwLock<HashMap<String, Bytes>>>;
 async fn test_registry(listener: TcpListener) -> miette::Result<()> {
     let state = Arc::new(RwLock::new(HashMap::<String, Bytes>::new()));
     let app = Router::new()
-        .route("/*path", get(get_package).put(put_package))
+        .route("/*path", get(get_package).head(head_package).put(put_package))
         .with_state(state);
     axum::serve(listener, app)
         .await
@@ -41,6 +41,19 @@ async fn get_package(
         .cloned()
         .ok_or(StatusCode::NOT_FOUND)?;
     Ok(([(header::CONTENT_TYPE, "application/x-gzip")], content))
+}
+
+/// HEAD handler: returns 200 if artifact exists, 404 otherwise (no body)
+async fn head_package(
+    extract::State(state): extract::State<State>,
+    extract::Path(path): extract::Path<String>,
+) -> StatusCode {
+    tracing::info!("HEAD check for {path}");
+    if state.read().unwrap().contains_key(&path) {
+        StatusCode::OK
+    } else {
+        StatusCode::NOT_FOUND
+    }
 }
 
 async fn put_package(

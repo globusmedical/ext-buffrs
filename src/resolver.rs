@@ -19,7 +19,7 @@ use crate::{
         RemoteDependencyManifest, ResolverMode, MANIFEST_FILE,
     },
     package::{Package, PackageName, PackageStore},
-    registry::{Artifactory, CertValidationPolicy, RegistryRef},
+    registry::{Artifactory, CertValidationPolicy, RegistryRef, RegistryUri},
 };
 
 /// Uniquely identifies a resolved package instance.
@@ -156,6 +156,8 @@ pub struct DependencyGraphBuilder<'a> {
     cache: &'a Cache,
     config: &'a Config,
     policy: CertValidationPolicy,
+    /// Optional shared HTTP client for connection pooling
+    client: Option<reqwest::Client>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -366,6 +368,25 @@ impl<'a> DependencyGraphBuilder<'a> {
             cache,
             config,
             policy,
+            client: None,
+        }
+    }
+
+    /// Sets a shared HTTP client for connection pooling.
+    ///
+    /// When set, all Artifactory registry operations will reuse this client's
+    /// connection pool instead of creating new connections for each request.
+    pub fn with_client(mut self, client: reqwest::Client) -> Self {
+        self.client = Some(client);
+        self
+    }
+
+    /// Creates an Artifactory client, reusing the shared HTTP client if available.
+    fn create_artifactory(&self, registry: RegistryUri) -> miette::Result<Artifactory> {
+        if let Some(ref client) = self.client {
+            Artifactory::new_with_client(registry, self.credentials, client.clone())
+        } else {
+            Artifactory::new(registry, self.credentials, self.policy)
         }
     }
 
@@ -780,15 +801,12 @@ impl<'a> DependencyGraphBuilder<'a> {
                 }
             }
 
-            let registry = Artifactory::new(
-                dependency.manifest.registry.clone().try_into()?,
-                self.credentials,
-                self.policy,
-            )
-            .wrap_err(DownloadError {
-                name: dependency.package.clone(),
-                version: dependency.manifest.version.clone(),
-            })?;
+            let registry = self
+                .create_artifactory(dependency.manifest.registry.clone().try_into()?)
+                .wrap_err(DownloadError {
+                    name: dependency.package.clone(),
+                    version: dependency.manifest.version.clone(),
+                })?;
 
             let package = registry
                 // TODO(#205): This works now because buffrs only supports pinned versions.
@@ -810,15 +828,12 @@ impl<'a> DependencyGraphBuilder<'a> {
         } else {
             // Package not present in lockfile (and thus not in cache)
             // => download it from the registry
-            let registry = Artifactory::new(
-                dependency.manifest.registry.clone().try_into()?,
-                self.credentials,
-                self.policy,
-            )
-            .wrap_err(DownloadError {
-                name: dependency.package.clone(),
-                version: dependency.manifest.version.clone(),
-            })?;
+            let registry = self
+                .create_artifactory(dependency.manifest.registry.clone().try_into()?)
+                .wrap_err(DownloadError {
+                    name: dependency.package.clone(),
+                    version: dependency.manifest.version.clone(),
+                })?;
 
             let package = registry
                 .download(dependency.clone().into())

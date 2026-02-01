@@ -139,7 +139,14 @@ impl Package {
         Ok(())
     }
 
+    /// Environment variable for opting-in to mtime preservation during extraction.
+    /// By default, file modification times are not preserved when extracting packages.
+    pub const ENV_PRESERVE_MTIME: &str = "BUFFRS_PRESERVE_MTIME";
+
     /// Unpack a package to a specific path.
+    ///
+    /// File modification times are not preserved by default. Set the `BUFFRS_PRESERVE_MTIME`
+    /// environment variable to `1` or `true` to preserve original file timestamps.
     pub async fn unpack(&self, path: &Path) -> miette::Result<()> {
         let mut tar = Vec::new();
         let mut gz = flate2::read::GzDecoder::new(self.tgz.clone().reader());
@@ -149,6 +156,21 @@ impl Package {
             .wrap_err(miette!("failed to decompress package {}", self.name()))?;
 
         let mut tar = tar::Archive::new(Bytes::from(tar).reader());
+        // Don't preserve Unix permissions on Windows - they can result in read-only files
+        tar.set_preserve_permissions(false);
+
+        // By default, don't preserve mtime unless explicitly requested via env var
+        let preserve_mtime = std::env::var(Self::ENV_PRESERVE_MTIME)
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True" | "yes" | "YES"))
+            .unwrap_or(false);
+        tar.set_preserve_mtime(preserve_mtime);
+
+        if preserve_mtime {
+            tracing::debug!(
+                "preserving file mtimes during extraction ({}=true)",
+                Self::ENV_PRESERVE_MTIME
+            );
+        }
 
         fs::remove_dir_all(path).await.ok();
 
@@ -166,6 +188,23 @@ impl Package {
                 path.display()
             )
         })?;
+
+        // On Windows, ensure all files are writable (clear read-only attribute)
+        #[cfg(windows)]
+        {
+            use walkdir::WalkDir;
+            for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
+                if entry.file_type().is_file() {
+                    if let Ok(metadata) = std::fs::metadata(entry.path()) {
+                        let mut perms = metadata.permissions();
+                        if perms.readonly() {
+                            perms.set_readonly(false);
+                            std::fs::set_permissions(entry.path(), perms).ok();
+                        }
+                    }
+                }
+            }
+        }
 
         Ok(())
     }

@@ -326,26 +326,38 @@ impl Manifest {
         let dependencies = raw
             .dependencies()
             .iter()
-            .map(|(package, manifest)| {
-                let package = package.clone();
-                let manifest = match manifest {
+            .map(|(toml_key, manifest)| {
+                let (package, resolved_manifest) = match manifest {
                     DependencyManifest::Remote(remote_manifest) => {
+                        // Use explicit package name if provided, otherwise use the TOML key
+                        let package = remote_manifest
+                            .package
+                            .clone()
+                            .unwrap_or_else(|| toml_key.clone());
                         // For remote manifest dependencies, resolve the registry alias
-                        DependencyManifest::Remote(RemoteDependencyManifest {
+                        let resolved_manifest = DependencyManifest::Remote(RemoteDependencyManifest {
+                            package: remote_manifest.package.clone(),
                             version: remote_manifest.version.clone(),
                             repository: remote_manifest.repository.clone(),
                             registry: remote_manifest.registry.with_alias_resolved(config)?,
                             resolver: remote_manifest.resolver,
                             namespace_overlap: remote_manifest.namespace_overlap,
-                        })
+                        });
+                        (package, resolved_manifest)
                     }
                     DependencyManifest::Local(local_manifest) => {
                         // For local dependencies, check if a remote manifest is present
                         // and resolve its registry alias
+                        let package = local_manifest
+                            .publish
+                            .as_ref()
+                            .and_then(|p| p.package.clone())
+                            .unwrap_or_else(|| toml_key.clone());
                         if let Some(ref remote_manifest) = local_manifest.publish {
-                            DependencyManifest::Local(LocalDependencyManifest {
+                            let resolved_manifest = DependencyManifest::Local(LocalDependencyManifest {
                                 path: local_manifest.path.clone(),
                                 publish: Some(RemoteDependencyManifest {
+                                    package: remote_manifest.package.clone(),
                                     version: remote_manifest.version.clone(),
                                     repository: remote_manifest.repository.clone(),
                                     registry: remote_manifest
@@ -354,14 +366,15 @@ impl Manifest {
                                     resolver: remote_manifest.resolver,
                                     namespace_overlap: remote_manifest.namespace_overlap,
                                 }),
-                            })
+                            });
+                            (package, resolved_manifest)
                         } else {
-                            manifest.clone()
+                            (package, manifest.clone())
                         }
                     }
                 };
 
-                Ok(Dependency { package, manifest })
+                Ok(Dependency { package, manifest: resolved_manifest })
             })
             .collect::<miette::Result<Vec<_>>>()?;
 
@@ -570,8 +583,11 @@ impl Dependency {
         version: VersionReq,
     ) -> Self {
         Self {
-            package,
+            package: package.clone(),
             manifest: RemoteDependencyManifest {
+                // When creating via Dependency::new, the manifest package field is None
+                // because the dependency key equals the package name
+                package: None,
                 repository,
                 version,
                 registry: registry.to_owned(),
@@ -693,6 +709,9 @@ pub enum NamespaceOverlapPolicy {
 /// Manifest format for dependencies
 #[derive(Debug, Clone, Hash, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoteDependencyManifest {
+    /// Optional explicit package name (when TOML key differs from actual package name)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<PackageName>,
     /// Version requirement in the buffrs format, currently only supports pinning
     pub version: VersionReq,
     /// Artifactory repository to pull dependency from
@@ -750,6 +769,7 @@ mod dependency_manifest_deserializer {
             #[derive(Deserialize)]
             struct TempManifest {
                 path: Option<PathBuf>,
+                package: Option<PackageName>,
                 version: Option<VersionReq>,
                 repository: Option<String>,
                 registry: Option<RegistryRef>,
@@ -768,6 +788,7 @@ mod dependency_manifest_deserializer {
                     publish: match (temp.version, temp.repository, temp.registry) {
                         (Some(version), Some(repository), Some(registry)) => {
                             Some(RemoteDependencyManifest {
+                                package: temp.package.clone(),
                                 version,
                                 repository,
                                 registry,
@@ -783,6 +804,7 @@ mod dependency_manifest_deserializer {
             {
                 // Deserialize as a remote dependency
                 Ok(DependencyManifest::Remote(RemoteDependencyManifest {
+                    package: temp.package,
                     version,
                     repository,
                     registry,
@@ -793,5 +815,49 @@ mod dependency_manifest_deserializer {
                 Err(D::Error::custom("Invalid dependency manifest"))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test: Proto.toml without [dependencies] should parse as empty dependencies.
+    /// See issue #23.
+    #[test]
+    fn manifest_without_dependencies_parses_as_empty() {
+        let toml = r#"
+edition = "0.50"
+
+[package]
+name = "test-package"
+version = "1.0.0"
+type = "lib"
+"#;
+        let manifest = Manifest::try_parse(toml, None).expect("should parse successfully");
+        assert!(
+            manifest.dependencies.is_empty(),
+            "expected zero dependencies, got {:?}",
+            manifest.dependencies
+        );
+        assert!(manifest.package.is_some());
+        assert_eq!(manifest.package.as_ref().unwrap().name.to_string(), "test-package");
+    }
+
+    /// Verify that an empty dependencies table also works.
+    #[test]
+    fn manifest_with_empty_dependencies_table() {
+        let toml = r#"
+edition = "0.50"
+
+[package]
+name = "another-package"
+version = "2.0.0"
+type = "api"
+
+[dependencies]
+"#;
+        let manifest = Manifest::try_parse(toml, None).expect("should parse successfully");
+        assert!(manifest.dependencies.is_empty());
     }
 }

@@ -21,7 +21,7 @@ use crate::{
     manifest::{Dependency, Manifest, PackageManifest, MANIFEST_FILE},
     metadata, namespace_scan,
     package::{Package, PackageName, PackageStore, PackageType},
-    registry::{Artifactory, CertValidationPolicy, RegistryRef, RegistryUri},
+    registry::{build_reqwest_client, Artifactory, CertValidationPolicy, RegistryRef, RegistryUri},
     resolver::{DependencyGraph, DependencyGraphBuilder, ResolvedDependency, ResolvedPackageId},
 };
 
@@ -401,13 +401,16 @@ pub enum GenerationOption {
 async fn rewrite_proto_namespaces_in_dir(dir: &Path, version: &Version) -> miette::Result<()> {
     use walkdir::WalkDir;
 
-    for entry in WalkDir::new(dir)
+    // Collect all proto file paths first to avoid holding WalkDir handles while writing
+    let proto_files: Vec<_> = WalkDir::new(dir)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().map_or(false, |ext| ext == "proto"))
-    {
-        let path = entry.path();
-        let contents = tokio::fs::read_to_string(path)
+        .map(|e| e.path().to_path_buf())
+        .collect();
+
+    for path in proto_files {
+        let contents = tokio::fs::read_to_string(&path)
             .await
             .into_diagnostic()
             .wrap_err(miette!("failed to read proto file {}", path.display()))?;
@@ -416,7 +419,7 @@ async fn rewrite_proto_namespaces_in_dir(dir: &Path, version: &Version) -> miett
 
         // Only write if content changed
         if rewritten != contents {
-            tokio::fs::write(path, rewritten)
+            tokio::fs::write(&path, rewritten)
                 .await
                 .into_diagnostic()
                 .wrap_err(miette!("failed to write proto file {}", path.display()))?;
@@ -444,6 +447,9 @@ pub async fn install(
     let credentials = Credentials::load().await?;
     let cache = Cache::open().await?;
 
+    // Build a shared HTTP client for connection pooling
+    let http_client = build_reqwest_client(policy)?;
+
     store.clear().await?;
 
     // Track whether we installed the local package itself (InstallMode::All)
@@ -464,6 +470,7 @@ pub async fn install(
 
     let dependency_graph =
         DependencyGraphBuilder::new(&manifest, &lockfile, &credentials, &cache, config, policy)
+            .with_client(http_client)
             .build()
             .await
             .wrap_err(miette!("dependency resolution failed"))?;
