@@ -160,7 +160,7 @@ version: v2
 modules:
 lint:
   use:
-    - DEFAULT
+    - STANDARD
   except:
     - PACKAGE_VERSION_SUFFIX
 breaking:
