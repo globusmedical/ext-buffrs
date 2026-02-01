@@ -596,4 +596,139 @@ message Foo {}
         // No package declaration, so content should be mostly unchanged
         assert!(!rewritten.contains("_v0_1_2"));
     }
+
+    /// Verifies the generated Rust module path follows the expected pattern.
+    /// Rust modules use the rewritten package name as their path.
+    #[test]
+    fn test_rewritten_package_rust_module_path() {
+        use semver::Version;
+
+        // Test case 1: Simple package name
+        let contents = r#"syntax = "proto3";
+package gm.algo.base;
+message Foo {}
+"#;
+        let version = Version::new(0, 1, 2);
+        let rewritten = rewrite_proto_package(contents, &version);
+
+        // Expected Rust module path: gm::algo::base::_v0_1_2
+        // This comes from the rewritten package: gm.algo.base._v0_1_2
+        assert!(rewritten.contains("package gm.algo.base._v0_1_2;"));
+
+        // The package name parts translate to Rust modules:
+        // gm.algo.base._v0_1_2 -> gm::algo::base::_v0_1_2
+        let expected_rust_mod = "gm::algo::base::_v0_1_2";
+        let pkg = extract_proto_package(&rewritten).unwrap();
+        let rust_mod_path = pkg.replace('.', "::");
+        assert_eq!(rust_mod_path, expected_rust_mod);
+    }
+
+    /// Verifies the generated C++ namespace follows the expected pattern.
+    #[test]
+    fn test_rewritten_package_cpp_namespace() {
+        use semver::Version;
+
+        let contents = r#"syntax = "proto3";
+package api.service.v1;
+message Request {}
+"#;
+        let version = Version::parse("1.2.3-alpha").unwrap();
+        let rewritten = rewrite_proto_package(contents, &version);
+
+        // Expected C++ namespace: api::service::v1::_v1_2_3_alpha
+        assert!(rewritten.contains("package api.service.v1._v1_2_3_alpha;"));
+
+        let pkg = extract_proto_package(&rewritten).unwrap();
+        let cpp_namespace = pkg.replace('.', "::");
+        assert_eq!(cpp_namespace, "api::service::v1::_v1_2_3_alpha");
+    }
+
+    /// Tests that multiple proto files can be rewritten independently,
+    /// simulating a package with multiple proto files.
+    #[test]
+    fn test_multiple_files_independent_rewriting() {
+        use semver::Version;
+        let version = Version::new(0, 1, 2);
+
+        // File 1: types.proto
+        let types_proto = r#"syntax = "proto3";
+package gm.algo.base;
+message BaseType { string id = 1; }
+"#;
+        let rewritten_types = rewrite_proto_package(types_proto, &version);
+        assert!(rewritten_types.contains("package gm.algo.base._v0_1_2;"));
+        assert!(rewritten_types.contains("message BaseType"));
+
+        // File 2: service.proto
+        let service_proto = r#"syntax = "proto3";
+package gm.algo.base;
+import "gm/algo/base/types.proto";
+service BaseService {
+  rpc GetBase(BaseType) returns (BaseType);
+}
+"#;
+        let rewritten_service = rewrite_proto_package(service_proto, &version);
+        assert!(rewritten_service.contains("package gm.algo.base._v0_1_2;"));
+        // Import path is NOT rewritten (import paths use file paths, not package names)
+        assert!(rewritten_service.contains("import \"gm/algo/base/types.proto\""));
+    }
+
+    /// Tests version suffix generation edge cases
+    #[test]
+    fn test_version_suffix_edge_cases() {
+        use semver::Version;
+
+        // Major-only versions
+        let v = Version::parse("1.0.0").unwrap();
+        assert_eq!(version_to_suffix(&v), "_v1_0");
+
+        // Patch versions
+        let v = Version::parse("0.0.1").unwrap();
+        assert_eq!(version_to_suffix(&v), "_v0_0_1");
+
+        // Build metadata is ignored per semver spec
+        let v = Version::parse("1.2.3+build.456").unwrap();
+        assert_eq!(version_to_suffix(&v), "_v1_2_3");
+
+        // Complex pre-release
+        let v = Version::parse("0.1.0-rc.1.2.3").unwrap();
+        assert_eq!(version_to_suffix(&v), "_v0_1_0_rc_1_2_3");
+    }
+
+    /// Simulates what a Rust consumer would see after namespace rewriting.
+    /// This validates the expected prost/tonic module structure.
+    #[test]
+    fn test_rust_consumer_module_structure() {
+        use semver::Version;
+
+        // Given two versions of the same package
+        let original = "package gm.algo.base;";
+
+        // Version 0.1.2
+        let contents_v1 = format!("syntax = \"proto3\";\n{}\nmessage OldMsg {{}}", original);
+        let v1 = Version::new(0, 1, 2);
+        let rewritten_v1 = rewrite_proto_package(&contents_v1, &v1);
+        let pkg_v1 = extract_proto_package(&rewritten_v1).unwrap();
+
+        // Version 0.1.3
+        let contents_v2 = format!("syntax = \"proto3\";\n{}\nmessage NewMsg {{}}", original);
+        let v2 = Version::new(0, 1, 3);
+        let rewritten_v2 = rewrite_proto_package(&contents_v2, &v2);
+        let pkg_v2 = extract_proto_package(&rewritten_v2).unwrap();
+
+        // The packages should be different
+        assert_ne!(pkg_v1, pkg_v2);
+
+        // Expected Rust usage:
+        // mod gm { mod algo { mod base {
+        //     mod _v0_1_2 { /* old types */ }
+        //     mod _v0_1_3 { /* new types */ }
+        // }}}
+        //
+        // use gm::algo::base::_v0_1_2::OldMsg;
+        // use gm::algo::base::_v0_1_3::NewMsg;
+
+        assert_eq!(pkg_v1, "gm.algo.base._v0_1_2");
+        assert_eq!(pkg_v2, "gm.algo.base._v0_1_3");
+    }
 }

@@ -10,40 +10,115 @@ By default, buffrs enforces single-version resolution: each package name can onl
 - Gradual migration between API versions is in progress
 - Independent subgraphs legitimately need different versions
 
+**Critically, consumers don't control upstream proto definitions.** When you depend on `lib-algo-base@0.1.2` and `lib-algo-base@0.1.3`, you cannot mandate that the upstream maintainer change their `package gm.algo.base;` declaration. Buffrs solves this by automatically rewriting proto namespaces when multi-version is enabled.
+
 ## Enabling Multi-Version
 
 To allow multiple versions of a specific dependency, add `resolver = "multiversion"` to that dependency in your `Proto.toml`:
 
 ```toml
-[dependencies.lib-algo-base]
-version = "=0.1.2"
-repository = "algo"
-registry = "https://registry.example.com"
+[dependencies]
+# Old version we still need
+lib-algo-base = { version = "=0.1.2", resolver = "multiversion" }
+
+# New version we're migrating to
+[dependencies.lib-algo-base-new]
+package = "lib-algo-base"
+version = "=0.1.3"
 resolver = "multiversion"
 ```
 
 This grants *permission* for buffrs to resolve multiple versions of `lib-algo-base` if the dependency constraints require it. It does not force duplicates—if a single version satisfies all constraints, only one version is resolved.
 
-**Which dependencies need the flag?** Only the "outlier" dependency needs `resolver = "multiversion"`. For example, if six targets use `lib-algo-base@0.1.3` and one target uses `@0.1.2`, only the `@0.1.2` dependency needs the flag. The flag means "I accept coexisting with other versions of this package."
+**Which dependencies need the flag?** All dependencies of the same package that may coexist need `resolver = "multiversion"`. The flag means "I accept coexisting with other versions of this package."
+
+## Automatic Namespace Rewriting
+
+When multi-version resolution results in multiple versions of the same package, buffrs automatically rewrites protobuf `package` declarations to include version information. This ensures generated code has unique symbols without requiring upstream changes.
+
+### How It Works
+
+When you run `buffrs install` with multi-version enabled, buffrs:
+
+1. Detects packages that have multiple versions resolved
+2. Rewrites `package` declarations to include a version suffix
+3. Writes the modified files to the vendor directory
+
+**Example transformation:**
+
+```protobuf
+// Original (in published package):
+package gm.algo.base;
+
+// After buffrs install (version 0.1.2):
+package gm.algo.base._v0_1_2;
+
+// After buffrs install (version 0.1.3-SPINE-4384):
+package gm.algo.base._v0_1_3_SPINE_4384;
+```
+
+### Version Suffix Format
+
+The version suffix follows the format `_v<major>_<minor>_<patch>` with special characters sanitized:
+
+| Version           | Suffix                   |
+| ----------------- | ------------------------ |
+| `0.1.2`           | `_v0_1_2`                |
+| `1.0.0`           | `_v1_0_0`                |
+| `0.1.3-SPINE-4384`| `_v0_1_3_SPINE_4384`     |
+| `2.0.0-beta.1`    | `_v2_0_0_beta_1`         |
 
 ## Impact on C++ Code
 
-**In most cases, no C++ code changes are required.**
+**With multi-version enabled, C++ code MUST use versioned namespaces.**
 
-Generated C++ code paths and namespaces come from the `package` declarations inside `.proto` files (e.g., `package gm.algo.base.v1;`), **not** from vendor directory names. This means:
+The rewritten proto packages result in unique C++ namespaces:
 
-| Scenario                          | C++ Code Changes? | Reason                                                          |
-| --------------------------------- | ----------------- | --------------------------------------------------------------- |
-| Same namespace, identical content | No                | Files are identical                                             |
-| Same namespace, different content | N/A               | Build fails (`namespace_overlap = "forbidden"`)                 |
-| Versioned namespaces (v1 vs v2)   | Maybe             | Different C++ namespaces; update includes if switching versions |
+| Original Proto          | Version | Rewritten Proto                 | C++ Namespace              |
+| ----------------------- | ------- | ------------------------------- | -------------------------- |
+| `package gm.algo.base;` | 0.1.2   | `package gm.algo.base._v0_1_2;` | `gm::algo::base::_v0_1_2`  |
+| `package gm.algo.base;` | 0.1.3   | `package gm.algo.base._v0_1_3;` | `gm::algo::base::_v0_1_3`  |
 
-The vendor directory layout (`lib-algo-base@0.1.2/` vs `lib-algo-base@0.1.3/`) is an implementation detail that does not affect your `#include` statements or C++ namespace usage.
+### Consumer Code Example
 
-**When C++ code might need changes:**
+```cpp
+#include <gm/algo/base/_v0_1_2/types.pb.h>
+#include <gm/algo/base/_v0_1_3/types.pb.h>
 
-- If you explicitly set `namespace_overlap = "allowed"` with different proto content, you risk ODR (One Definition Rule) violations at link time. This is strongly discouraged.
-- If you're migrating from one API version to another (e.g., `v1` → `v2`), you'll update your code to use the new namespace regardless of multi-version resolution.
+// Option 1: Use full versioned namespace
+void process_old(const gm::algo::base::_v0_1_2::SomeMessage& msg);
+void process_new(const gm::algo::base::_v0_1_3::SomeMessage& msg);
+
+// Option 2: Use namespace aliases (recommended)
+namespace algo_old = gm::algo::base::_v0_1_2;
+namespace algo_new = gm::algo::base::_v0_1_3;
+
+void adapt(const algo_old::Request& old_req) {
+    algo_new::Request new_req;
+    // ... convert between versions
+}
+```
+
+### Rust Consumer Code Example
+
+```rust
+// The generated Rust modules also use versioned names
+mod gm {
+    pub mod algo {
+        pub mod base {
+            pub mod _v0_1_2 {
+                include!(concat!(env!("OUT_DIR"), "/gm.algo.base._v0_1_2.rs"));
+            }
+            pub mod _v0_1_3 {
+                include!(concat!(env!("OUT_DIR"), "/gm.algo.base._v0_1_3.rs"));
+            }
+        }
+    }
+}
+
+use gm::algo::base::_v0_1_2 as algo_old;
+use gm::algo::base::_v0_1_3 as algo_new;
+```
 
 ## Vendor Layout
 
@@ -63,24 +138,22 @@ Packages without version conflicts continue to use simple directory names (e.g.,
 
 ## Namespace Overlap Policy
 
-When multiple versions of a package exist, there's a risk that they declare the same protobuf `package` namespace. This can cause symbol collisions when linking C++ or other compiled code.
+When multiple versions of a package exist, buffrs provides a `namespace_overlap` policy to control how conflicts are handled.
 
-Buffrs provides a `namespace_overlap` policy to control this:
+### `rewrite` (default)
 
-### `forbidden` (default)
-
-Fail if two versions declare the same protobuf namespace:
+Automatically rewrite `package` declarations to include version suffixes. This is the default and recommended policy:
 
 ```toml
 [dependencies.my-package]
 version = "=1.0.0"
 resolver = "multiversion"
-namespace_overlap = "forbidden"
+# namespace_overlap = "rewrite" is implied
 ```
 
 ### `identical_only`
 
-Allow overlap only if the proto file content hashes match (i.e., the files are identical):
+Skip rewriting and allow overlap only if the proto file content hashes match (i.e., the files are identical):
 
 ```toml
 [dependencies.my-package]
@@ -89,34 +162,34 @@ resolver = "multiversion"
 namespace_overlap = "identical_only"
 ```
 
-### `allowed`
+This is useful when you know different versions share common base types with identical definitions.
 
-Allow overlap unconditionally. **Use with caution**—this acknowledges that you understand the risk of symbol collisions:
+### `forbidden`
+
+Fail if multi-version would result in namespace overlap. Use this when you cannot adapt consumer code to use versioned namespaces:
 
 ```toml
 [dependencies.my-package]
 version = "=1.0.0"
 resolver = "multiversion"
-namespace_overlap = "allowed"
+namespace_overlap = "forbidden"
 ```
 
 ## Best Practices
 
 1. **Use sparingly**: Multi-version should be the exception, not the rule. Prefer updating all consumers to a single version when possible.
 
-2. **Version your proto namespaces**: If you need multiple API versions to coexist safely, consider versioning your protobuf `package` declarations:
+2. **Plan for versioned namespaces**: When enabling multi-version, anticipate that your C++/Rust code will need to use versioned namespace prefixes like `_v0_1_2`.
 
-   ```protobuf
-   // v1
-   package mycompany.api.v1;
-   
-   // v2
-   package mycompany.api.v2;
+3. **Create namespace aliases**: Make your code cleaner with namespace aliases:
+   ```cpp
+   namespace algo_v1 = gm::algo::base::_v0_1_2;
+   namespace algo_v2 = gm::algo::base::_v0_1_3;
    ```
 
-3. **Audit your dependency graph**: Before enabling multi-version, understand why different versions are needed. Sometimes the root cause is an outdated transitive dependency that should be updated.
+4. **Audit your dependency graph**: Before enabling multi-version, understand why different versions are needed. Sometimes the root cause is an outdated transitive dependency that should be updated.
 
-4. **Test thoroughly**: Multiple versions can introduce subtle runtime issues. Ensure your test coverage includes scenarios with multi-version dependencies.
+5. **Test thoroughly**: Multiple versions can introduce subtle runtime issues. Ensure your test coverage includes scenarios with multi-version dependencies.
 
 ## Monorepo Considerations
 
