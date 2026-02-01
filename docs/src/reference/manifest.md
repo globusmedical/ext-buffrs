@@ -96,11 +96,11 @@ namespace_overlap = "forbidden"     # Default: fail on namespace collision
 
 ### `namespace_overlap` Values
 
-| Value            | Description                                                   |
-| ---------------- | ------------------------------------------------------------- |
-| `forbidden`      | Fail if multiple versions declare the same protobuf namespace |
-| `identical_only` | Allow overlap only if proto file content hashes match         |
-| `allowed`        | Allow overlap (explicit hazard acknowledgment)                |
+| Value            | Description                                                          |
+| ---------------- | -------------------------------------------------------------------- |
+| `rewrite`        | Automatically rewrite package declarations with version suffixes (default) |
+| `identical_only` | Allow overlap only if proto file content hashes match                |
+| `forbidden`      | Fail if multiple versions declare the same protobuf namespace        |
 
 ## Edition
 

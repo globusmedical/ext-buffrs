@@ -288,17 +288,17 @@ pub async fn scan_dependency_graph(
 /// The suffix format is `_v<major>_<minor>_<patch>` with any pre-release identifiers
 /// appended after replacing non-alphanumeric characters with underscores.
 ///
+/// The patch version is always included to ensure the suffix is unambiguous and
+/// reversible (DR-BUFFRS-1260).
+///
 /// # Examples
 /// - `0.1.2` → `_v0_1_2`
+/// - `1.0.0` → `_v1_0_0`
 /// - `0.1.2-SPINE-4384` → `_v0_1_2_SPINE_4384`
 /// - `1.0.0-rc.1` → `_v1_0_0_rc_1`
 pub fn version_to_suffix(version: &Version) -> String {
-    let mut suffix = format!("_v{}_{}", version.major, version.minor);
-
-    // Only add patch if non-zero or if there's pre-release
-    if version.patch > 0 || !version.pre.is_empty() {
-        suffix.push_str(&format!("_{}", version.patch));
-    }
+    // Always include all three version components for unambiguous reversibility
+    let mut suffix = format!("_v{}_{}_{}", version.major, version.minor, version.patch);
 
     // Add pre-release identifiers
     if !version.pre.is_empty() {
@@ -511,7 +511,7 @@ package real.package.v1;
     fn test_version_to_suffix_simple() {
         use semver::Version;
         assert_eq!(version_to_suffix(&Version::new(0, 1, 2)), "_v0_1_2");
-        assert_eq!(version_to_suffix(&Version::new(1, 0, 0)), "_v1_0");
+        assert_eq!(version_to_suffix(&Version::new(1, 0, 0)), "_v1_0_0");
         assert_eq!(version_to_suffix(&Version::new(2, 3, 4)), "_v2_3_4");
     }
 
@@ -557,7 +557,7 @@ message Bar {}
 "#;
         let version = Version::new(1, 0, 0);
         let rewritten = rewrite_proto_package(contents, &version);
-        assert!(rewritten.contains("package api.service.v2._v1_0;"));
+        assert!(rewritten.contains("package api.service.v2._v1_0_0;"));
     }
 
     #[test]
@@ -678,9 +678,9 @@ service BaseService {
     fn test_version_suffix_edge_cases() {
         use semver::Version;
 
-        // Major-only versions
+        // Major-only versions (patch always included for reversibility)
         let v = Version::parse("1.0.0").unwrap();
-        assert_eq!(version_to_suffix(&v), "_v1_0");
+        assert_eq!(version_to_suffix(&v), "_v1_0_0");
 
         // Patch versions
         let v = Version::parse("0.0.1").unwrap();

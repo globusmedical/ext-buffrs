@@ -571,3 +571,164 @@ fn content_hash_is_deterministic() {
     // Hash should be 64 hex chars (sha256)
     assert_eq!(hash1.len(), 64);
 }
+
+/// Tests automatic namespace rewriting when multiple versions use the SAME namespace.
+/// This is the core feature of multi-version support: when lib-base@0.1.0 and lib-base@0.2.0
+/// both declare `package lib.base;`, buffrs must rewrite them to unique namespaces like
+/// `package lib.base._v0_1_0;` and `package lib.base._v0_2_0;`.
+#[test]
+fn multiversion_same_namespace_rewriting() {
+    with_test_registry(|url| {
+        let vfs = VirtualFileSystem::empty();
+        let buffrs_home = vfs.root().join("$HOME");
+        let cwd = vfs.root();
+
+        // Publish lib-algo-base@0.1.0 with package lib.algo.base
+        {
+            std::fs::create_dir(cwd.join("lib-algo-base-v1")).unwrap();
+            let lib_cwd = cwd.join("lib-algo-base-v1");
+
+            crate::cli!()
+                .args(["init", "--lib", "lib-algo-base"])
+                .env("BUFFRS_HOME", &buffrs_home)
+                .current_dir(&lib_cwd)
+                .assert()
+                .success();
+
+            std::fs::write(
+                lib_cwd.join("proto/base.proto"),
+                r#"syntax = "proto3";
+package lib.algo.base;
+
+message BaseMessage {
+    string value = 1;
+}
+"#,
+            )
+            .unwrap();
+
+            crate::cli!()
+                .args(["publish", "--registry", url, "--repository", "libs"])
+                .env("BUFFRS_HOME", &buffrs_home)
+                .current_dir(&lib_cwd)
+                .assert()
+                .success();
+        }
+
+        // Publish lib-algo-base@0.2.0 with the SAME package declaration (lib.algo.base)
+        {
+            std::fs::create_dir(cwd.join("lib-algo-base-v2")).unwrap();
+            let lib_cwd = cwd.join("lib-algo-base-v2");
+
+            std::fs::write(
+                lib_cwd.join("Proto.toml"),
+                r#"edition = "0.50"
+
+[package]
+type = "lib"
+name = "lib-algo-base"
+version = "0.2.0"
+
+[dependencies]
+"#,
+            )
+            .unwrap();
+
+            std::fs::create_dir_all(lib_cwd.join("proto")).unwrap();
+            std::fs::write(
+                lib_cwd.join("proto/base.proto"),
+                r#"syntax = "proto3";
+package lib.algo.base;
+
+message BaseMessage {
+    string value = 1;
+    string extra = 2;
+}
+"#,
+            )
+            .unwrap();
+
+            crate::cli!()
+                .args(["publish", "--registry", url, "--repository", "libs"])
+                .env("BUFFRS_HOME", &buffrs_home)
+                .current_dir(&lib_cwd)
+                .assert()
+                .success();
+        }
+
+        // Consumer that needs both versions via multiversion resolver
+        {
+            std::fs::create_dir(cwd.join("consumer")).unwrap();
+            let consumer_cwd = cwd.join("consumer");
+
+            // Use dictionary syntax with different keys for each version
+            std::fs::write(
+                consumer_cwd.join("Proto.toml"),
+                format!(
+                    r#"edition = "0.50"
+
+[dependencies]
+lib-algo-base = {{ version = "=0.1.0", registry = "{url}", repository = "libs", resolver = "multiversion" }}
+lib-algo-base-v2 = {{ package = "lib-algo-base", version = "=0.2.0", registry = "{url}", repository = "libs", resolver = "multiversion" }}
+"#
+                ),
+            )
+            .unwrap();
+
+            std::fs::create_dir_all(consumer_cwd.join("proto")).unwrap();
+
+            crate::cli!()
+                .arg("install")
+                .env("BUFFRS_HOME", &buffrs_home)
+                .current_dir(&consumer_cwd)
+                .assert()
+                .success();
+
+            // Verify both versioned directories exist
+            assert!(
+                consumer_cwd.join("proto/vendor/lib-algo-base@0.1.0").exists(),
+                "lib-algo-base@0.1.0 directory should exist"
+            );
+            assert!(
+                consumer_cwd.join("proto/vendor/lib-algo-base@0.2.0").exists(),
+                "lib-algo-base@0.2.0 directory should exist"
+            );
+
+            // Read the proto files and verify namespace rewriting
+            let proto_v1 = std::fs::read_to_string(
+                consumer_cwd.join("proto/vendor/lib-algo-base@0.1.0/base.proto"),
+            )
+            .unwrap();
+            let proto_v2 = std::fs::read_to_string(
+                consumer_cwd.join("proto/vendor/lib-algo-base@0.2.0/base.proto"),
+            )
+            .unwrap();
+
+            // The namespace should be rewritten to include version suffix
+            assert!(
+                proto_v1.contains("package lib.algo.base._v0_1_0;"),
+                "proto v1 should have rewritten namespace with _v0_1_0 suffix, got: {}",
+                proto_v1
+            );
+            assert!(
+                proto_v2.contains("package lib.algo.base._v0_2_0;"),
+                "proto v2 should have rewritten namespace with _v0_2_0 suffix, got: {}",
+                proto_v2
+            );
+
+            // Verify namespaces.json contains the rewritten namespaces
+            let namespaces_json = std::fs::read_to_string(
+                consumer_cwd.join("proto/vendor/_buffrs_meta/namespaces.json"),
+            )
+            .unwrap();
+            assert!(
+                namespaces_json.contains("lib.algo.base._v0_1_0"),
+                "namespaces.json should contain rewritten namespace for v0.1.0"
+            );
+            assert!(
+                namespaces_json.contains("lib.algo.base._v0_2_0"),
+                "namespaces.json should contain rewritten namespace for v0.2.0"
+            );
+        }
+    });
+}
