@@ -74,6 +74,9 @@ pub struct Config {
 struct ResolverConfig {
     allow_multiple_versions: bool,
     skip_link_safety_check: bool,
+    /// Use legacy greedy resolution instead of PubGrub SAT-based resolution.
+    /// Only use this if you encounter issues with PubGrub.
+    use_greedy_resolver: bool,
 }
 
 impl Config {
@@ -93,6 +96,7 @@ impl Config {
                 resolver: ResolverConfig {
                     allow_multiple_versions: false,
                     skip_link_safety_check: false,
+                    use_greedy_resolver: false,
                 },
             }),
         }
@@ -111,6 +115,17 @@ impl Config {
     /// that the proto namespaces don't actually conflict at runtime.
     pub fn skip_link_safety_check(&self) -> bool {
         self.resolver.skip_link_safety_check
+    }
+
+    /// Use legacy greedy resolution instead of PubGrub.
+    ///
+    /// When enabled, the resolver uses simple greedy version selection
+    /// instead of SAT-based resolution. This may fail on diamond dependencies.
+    ///
+    /// This is provided for backward compatibility and debugging. The default
+    /// PubGrub resolver should be preferred for most use cases.
+    pub fn use_greedy_resolver(&self) -> bool {
+        self.resolver.use_greedy_resolver
     }
 
     /// Parse a registry argument
@@ -256,9 +271,16 @@ impl Config {
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
 
+        let use_greedy_resolver = config
+            .get("resolver")
+            .and_then(|resolver| resolver.get("use_greedy_resolver"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+
         ResolverConfig {
             allow_multiple_versions,
             skip_link_safety_check,
+            use_greedy_resolver,
         }
     }
 

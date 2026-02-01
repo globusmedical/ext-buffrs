@@ -164,13 +164,15 @@ impl Artifactory {
             .map(|_| ())
     }
 
-    /// Retrieves the latest version of a package by querying artifactory. Returns an error if no artifact could be found
-    pub async fn get_latest_version(
+    /// Retrieves all available versions of a package from artifactory.
+    ///
+    /// Returns a list of all valid semver versions found for the package.
+    pub async fn list_versions(
         &self,
         repository: String,
         name: PackageName,
-    ) -> miette::Result<Version> {
-        // First retrieve all packages matching the given name
+    ) -> miette::Result<Vec<Version>> {
+        // Retrieve all packages matching the given name
         let search_query_url: Url = {
             let mut uri: url::Url = self.registry.to_owned().into();
             uri.set_path("artifactory/api/search/artifact");
@@ -210,8 +212,8 @@ impl Artifactory {
             parsed_response
         );
 
-        // Then from all package names retrieved from artifactory, extract the highest version number
-        let highest_version = parsed_response
+        // Extract all valid versions from the artifact URIs
+        let versions: Vec<Version> = parsed_response
             .results
             .iter()
             .filter_map(|artifact_search_result| {
@@ -220,11 +222,17 @@ impl Artifactory {
                     .split('/')
                     .next_back()
                     .map(|name_tgz| name_tgz.trim_end_matches(".tgz"));
-                let artifact_version = full_artifact_name
-                    .and_then(|name| name.split('-').next_back())
-                    .and_then(|version_str| Version::parse(version_str).ok());
+                let artifact_version = full_artifact_name.and_then(|artifact_name| {
+                    // Extract version by removing the package name prefix
+                    // Format: {name}-{version}.tgz
+                    let name_str = name.to_string();
+                    artifact_name
+                        .strip_prefix(&name_str)
+                        .and_then(|rest| rest.strip_prefix('-'))
+                        .and_then(|version_str| Version::parse(version_str).ok())
+                });
 
-                // we double check that the artifact name matches exactly
+                // Double-check that the artifact name matches exactly
                 let expected_artifact_name =
                     artifact_version.clone().map(|av| format!("{name}-{av}"));
                 if full_artifact_name.is_some_and(|actual| {
@@ -235,15 +243,83 @@ impl Artifactory {
                     None
                 }
             })
-            .max();
+            .collect();
 
-        tracing::debug!("Highest version for artifact: {:?}", highest_version);
-        highest_version.ok_or_else(|| {
+        tracing::debug!(
+            "Found {} versions for {}: {:?}",
+            versions.len(),
+            name,
+            versions
+        );
+        Ok(versions)
+    }
+
+    /// Retrieves the latest version of a package by querying artifactory. Returns an error if no artifact could be found
+    pub async fn get_latest_version(
+        &self,
+        repository: String,
+        name: PackageName,
+    ) -> miette::Result<Version> {
+        let versions = self.list_versions(repository, name.clone()).await?;
+
+        versions.into_iter().max().ok_or_else(|| {
             miette!("no version could be found on artifactory for this artifact name. Does it exist in this registry and repository?")
         })
     }
 
-    /// Downloads a package from artifactory
+    /// Downloads a package from artifactory using an already-resolved exact version.
+    ///
+    /// This is the preferred method when version resolution has already been performed.
+    pub async fn download_version(
+        &self,
+        repository: &str,
+        name: &PackageName,
+        version: &Version,
+    ) -> miette::Result<Package> {
+        use crate::version::version_to_artifact_string;
+
+        let artifact_url = {
+            let version_str = version_to_artifact_string(version);
+            let url: RegistryUri = self.registry.clone();
+            let mut url: url::Url = url.into();
+            let path = url.path();
+
+            url.set_path(&format!(
+                "{}/{}/{}/{}-{}.tgz",
+                path, repository, name, name, version_str
+            ));
+
+            url
+        };
+
+        tracing::debug!("Hitting download URL: {artifact_url}");
+
+        let response = self.new_request(Method::GET, artifact_url).send().await?;
+        let response: reqwest::Response = response.0;
+        let headers = response.headers();
+        let content_type = headers
+            .get(&reqwest::header::CONTENT_TYPE)
+            .ok_or_else(|| miette!("missing content-type header"))?;
+
+        ensure!(
+            content_type == reqwest::header::HeaderValue::from_static("application/x-gzip"),
+            "server response has incorrect mime type: {content_type:?}"
+        );
+
+        let data = response.bytes().await.into_diagnostic()?;
+
+        Package::try_from(data).wrap_err(miette!(
+            "failed to download dependency {}@{}",
+            name,
+            version
+        ))
+    }
+
+    /// Downloads a package from artifactory.
+    ///
+    /// Note: This method requires the dependency to have an exact version pinned.
+    /// For flexible version requirements, use `download_version()` after resolving
+    /// the version with `list_versions()` and `select_version()`.
     pub async fn download(&self, dependency: Dependency) -> miette::Result<Package> {
         let DependencyManifest::Remote(ref manifest) = dependency.manifest else {
             return Err(miette!(
