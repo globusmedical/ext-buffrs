@@ -16,6 +16,7 @@ use std::{
     collections::BTreeMap,
     io::{self, Cursor, Read, Write},
     path::{Path, PathBuf},
+    time::UNIX_EPOCH,
 };
 
 use bytes::{Buf, Bytes};
@@ -27,7 +28,7 @@ use crate::{
     errors::{DeserializationError, SerializationError},
     lock::{Digest, DigestAlgorithm, LockedPackage},
     manifest::{self, Edition, Manifest, PublishableManifest, ResolvedManifest},
-    package::PackageName,
+    package::{store::Entry, PackageName},
     registry::RegistryRef,
     ManagedFile,
 };
@@ -48,7 +49,17 @@ impl Package {
     ///
     /// This intentionally uses a [`BTreeMap`] to ensure that the list of files is sorted
     /// lexicographically. This ensures a reproducible output.
-    pub fn create(mut manifest: Manifest, files: BTreeMap<PathBuf, Bytes>) -> miette::Result<Self> {
+    ///
+    /// # Arguments
+    ///
+    /// * `manifest` - The package manifest
+    /// * `files` - Map of file paths to their entries (content + optional metadata)
+    /// * `preserve_mtime` - If `true`, preserves modification times of files in the tarball
+    pub fn create(
+        mut manifest: Manifest,
+        files: BTreeMap<PathBuf, Entry>,
+        preserve_mtime: bool,
+    ) -> miette::Result<Self> {
         // Create a new conforming manifest if the edition is unknown
         if manifest.edition == Edition::Unknown {
             manifest = Manifest::new(manifest.package.clone(), manifest.dependencies.clone());
@@ -61,6 +72,10 @@ impl Package {
             ));
         }
 
+        if preserve_mtime {
+            tracing::debug!("preserving file mtimes during packaging");
+        }
+
         let mut archive = tar::Builder::new(Vec::new());
 
         // Add original and resolved manifests
@@ -69,12 +84,27 @@ impl Package {
         Self::add_manifest_to_archive(&mut archive, manifest.clone())?;
 
         // Add files to the archive
-        for (name, contents) in &files {
+        for (name, entry) in &files {
             let mut header = tar::Header::new_gnu();
             header.set_mode(0o444);
-            header.set_size(contents.len() as u64);
+            header.set_size(entry.contents.len() as u64);
+
+            // Set mtime if preservation is enabled and entry has metadata with mtime
+            if preserve_mtime {
+                let mtime = entry
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_secs());
+
+                if let Some(mtime) = mtime {
+                    header.set_mtime(mtime);
+                }
+            }
+
             archive
-                .append_data(&mut header, name, &contents[..])
+                .append_data(&mut header, name, &entry.contents[..])
                 .into_diagnostic()
                 .wrap_err(miette!("failed to add proto {name:?} to release tar"))?;
         }
@@ -139,14 +169,7 @@ impl Package {
         Ok(())
     }
 
-    /// Environment variable for opting-in to mtime preservation during extraction.
-    /// By default, file modification times are not preserved when extracting packages.
-    pub const ENV_PRESERVE_MTIME: &str = "BUFFRS_PRESERVE_MTIME";
-
     /// Unpack a package to a specific path.
-    ///
-    /// File modification times are not preserved by default. Set the `BUFFRS_PRESERVE_MTIME`
-    /// environment variable to `1` or `true` to preserve original file timestamps.
     pub async fn unpack(&self, path: &Path) -> miette::Result<()> {
         let mut tar = Vec::new();
         let mut gz = flate2::read::GzDecoder::new(self.tgz.clone().reader());
@@ -158,19 +181,6 @@ impl Package {
         let mut tar = tar::Archive::new(Bytes::from(tar).reader());
         // Don't preserve Unix permissions on Windows - they can result in read-only files
         tar.set_preserve_permissions(false);
-
-        // By default, don't preserve mtime unless explicitly requested via env var
-        let preserve_mtime = std::env::var(Self::ENV_PRESERVE_MTIME)
-            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True" | "yes" | "YES"))
-            .unwrap_or(false);
-        tar.set_preserve_mtime(preserve_mtime);
-
-        if preserve_mtime {
-            tracing::debug!(
-                "preserving file mtimes during extraction ({}=true)",
-                Self::ENV_PRESERVE_MTIME
-            );
-        }
 
         fs::remove_dir_all(path).await.ok();
 

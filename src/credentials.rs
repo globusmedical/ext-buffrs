@@ -45,7 +45,7 @@ impl Credentials {
         fs::try_exists(Self::location()?)
             .await
             .into_diagnostic()
-            .wrap_err(FileExistsError(CREDENTIALS_FILE))
+            .wrap_err(FileExistsError(CREDENTIALS_FILE.to_string()))
     }
 
     /// Reads the credentials from the file system

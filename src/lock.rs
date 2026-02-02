@@ -12,15 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use miette::{ensure, Context, IntoDiagnostic};
+use miette::{ensure, miette, Context, IntoDiagnostic};
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use thiserror::Error;
 use tokio::fs;
 use url::Url;
 
 use crate::{
-    errors::{DeserializationError, FileExistsError, FileNotFound, SerializationError, WriteError},
+    errors::{DeserializationError, FileExistsError, FileNotFound, SerializationError},
+    io::File,
     package::{Package, PackageName},
     registry::{RegistryRef, RegistryUri},
     ManagedFile,
@@ -178,7 +180,7 @@ impl Lockfile {
         fs::try_exists(LOCKFILE)
             .await
             .into_diagnostic()
-            .wrap_err(FileExistsError(LOCKFILE))
+            .wrap_err(FileExistsError(LOCKFILE.to_string()))
     }
 
     /// Loads the Lockfile from the current directory
@@ -211,6 +213,17 @@ impl Lockfile {
     /// Only writes the file if the content has changed to avoid
     /// unnecessary timestamp updates that trigger rebuild cascades.
     pub async fn write(&self) -> miette::Result<()> {
+        self.write_to_path(LOCKFILE).await
+    }
+
+    /// Internal helper to write lockfile to a specific path.
+    ///
+    /// Only writes the file if the content has changed to avoid
+    /// unnecessary timestamp updates that trigger rebuild cascades.
+    async fn write_to_path<P: AsRef<Path>>(&self, path: P) -> miette::Result<()> {
+        let path_ref = path.as_ref();
+        let path_str = path_ref.to_string_lossy();
+
         let mut packages: Vec<_> = self
             .packages
             .iter()
@@ -234,7 +247,7 @@ impl Lockfile {
             .wrap_err(SerializationError(ManagedFile::Lock))?;
 
         // Check if file exists and content is unchanged
-        if let Ok(existing_content) = fs::read_to_string(LOCKFILE).await {
+        if let Ok(existing_content) = fs::read_to_string(path_ref).await {
             if existing_content == new_content {
                 // Content unchanged - skip write to preserve timestamp
                 return Ok(());
@@ -242,10 +255,10 @@ impl Lockfile {
         }
 
         // Content changed or file doesn't exist - write it
-        fs::write(LOCKFILE, new_content.into_bytes())
+        fs::write(path_ref, new_content.into_bytes())
             .await
             .into_diagnostic()
-            .wrap_err(WriteError(LOCKFILE))
+            .wrap_err(miette!("failed to write lockfile to {}", path_str))
     }
 
     /// Locates a given package in the Lockfile
@@ -308,6 +321,38 @@ impl FromIterator<LockedPackage> for Lockfile {
         Self {
             packages: iter.into_iter().collect(),
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl File for Lockfile {
+    const DEFAULT_PATH: &'static str = LOCKFILE;
+
+    async fn load_from<P>(path: P) -> miette::Result<Self>
+    where
+        P: AsRef<Path> + Send + Sync,
+    {
+        let path_str = path.as_ref().to_string_lossy().to_string();
+        let contents = fs::read_to_string(path.as_ref()).await;
+        match contents {
+            Ok(contents) => {
+                let raw: RawLockfile = toml::from_str(&contents)
+                    .into_diagnostic()
+                    .wrap_err(DeserializationError(ManagedFile::Lock))?;
+                Ok(Self::from_iter(raw.packages.into_iter()))
+            }
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::NotFound) => {
+                Err(FileNotFound(path_str).into())
+            }
+            Err(err) => Err(err).into_diagnostic(),
+        }
+    }
+
+    async fn save<P>(&self, path: P) -> miette::Result<()>
+    where
+        P: AsRef<Path> + Send + Sync,
+    {
+        self.write_to_path(path).await
     }
 }
 

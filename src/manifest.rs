@@ -303,7 +303,7 @@ impl Manifest {
         fs::try_exists(MANIFEST_FILE)
             .await
             .into_diagnostic()
-            .wrap_err(FileExistsError(MANIFEST_FILE))
+            .wrap_err(FileExistsError(MANIFEST_FILE.to_string()))
     }
 
     /// Loads the manifest from the current directory
@@ -801,8 +801,12 @@ mod dependency_manifest_deserializer {
                 Ok(DependencyManifest::Local(LocalDependencyManifest {
                     package: temp.package.clone(),
                     path,
-                    publish: match (temp.version, temp.repository, temp.registry) {
-                        (Some(version), Some(repository), Some(registry)) => {
+                    publish: match (temp.version, temp.repository) {
+                        (Some(version), Some(repository)) => {
+                            // Use explicit registry or UseDefault if not specified
+                            let registry = temp
+                                .registry
+                                .unwrap_or(crate::registry::RegistryRef::UseDefault);
                             Some(RemoteDependencyManifest {
                                 package: temp.package.clone(),
                                 version,
@@ -815,10 +819,12 @@ mod dependency_manifest_deserializer {
                         _ => None,
                     },
                 }))
-            } else if let (Some(version), Some(repository), Some(registry)) =
-                (temp.version, temp.repository, temp.registry)
-            {
+            } else if let (Some(version), Some(repository)) = (temp.version, temp.repository) {
                 // Deserialize as a remote dependency
+                // Use explicit registry or UseDefault if not specified
+                let registry = temp
+                    .registry
+                    .unwrap_or(crate::registry::RegistryRef::UseDefault);
                 Ok(DependencyManifest::Remote(RemoteDependencyManifest {
                     package: temp.package,
                     version,
@@ -878,5 +884,41 @@ type = "api"
 "#;
         let manifest = Manifest::try_parse(toml, None).expect("should parse successfully");
         assert!(manifest.dependencies.is_empty());
+    }
+
+    /// Verify that omitting registry uses the default registry.
+    #[test]
+    fn dependency_without_registry_uses_default() {
+        use crate::registry::RegistryRef;
+
+        let toml = r#"
+edition = "0.50"
+
+[package]
+name = "test-package"
+version = "1.0.0"
+type = "lib"
+
+[dependencies]
+lib-algo-base = { version = "=0.1.3-SPINE-4384", repository = "grpc" }
+"#;
+        // Parse should succeed without config (registry will be UseDefault)
+        let manifest = Manifest::try_parse(toml, None).expect("should parse successfully");
+        assert_eq!(manifest.dependencies.len(), 1);
+
+        let dep = &manifest.dependencies[0];
+        assert_eq!(dep.package.to_string(), "lib-algo-base");
+
+        // Verify the registry is UseDefault
+        match &dep.manifest {
+            DependencyManifest::Remote(remote) => {
+                assert!(
+                    matches!(remote.registry, RegistryRef::UseDefault),
+                    "expected UseDefault registry, got {:?}",
+                    remote.registry
+                );
+            }
+            other => panic!("expected Remote dependency, got {:?}", other),
+        }
     }
 }
