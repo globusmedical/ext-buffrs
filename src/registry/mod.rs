@@ -60,13 +60,21 @@ pub enum RegistryRef {
         /// The resolved URL
         url: RegistryUri,
     },
+    /// Placeholder: use the default registry from config.
+    /// This is set during manifest parsing when the `registry` field is omitted.
+    /// It must be resolved before use by calling `with_default_resolved`.
+    UseDefault,
 }
 
 impl RegistryRef {
-    /// Get the raw URL of the registry with any alias resolved
+    /// Get the raw URL of the registry with any alias or default resolved
     ///
     /// # Arguments
-    /// * `config` - The configuration to use to resolve the alias
+    /// * `config` - The configuration to use to resolve the alias or default
+    ///
+    /// If config is `None` and the registry is `UseDefault`, this returns
+    /// `UseDefault` unchanged (deferred resolution). Actual installation
+    /// commands will have config available to resolve it.
     pub fn with_alias_resolved(&self, config: Option<&config::Config>) -> miette::Result<Self> {
         match self {
             RegistryRef::Alias(alias) => match config {
@@ -81,6 +89,16 @@ impl RegistryRef {
                     "no configuration provided to resolve alias \"{}\"",
                     alias
                 )),
+            },
+            RegistryRef::UseDefault => match config {
+                Some(config) => {
+                    // Get the default registry from config and resolve it
+                    let default_ref = config.parse_registry_arg(&None)?;
+                    // Recursively resolve in case the default is itself an alias
+                    default_ref.with_alias_resolved(Some(config))
+                }
+                // When no config is available, preserve UseDefault for later resolution
+                None => Ok(self.clone()),
             },
             _ => Ok(self.clone()),
         }
@@ -120,6 +138,9 @@ impl Serialize for RegistryRef {
             RegistryRef::ResolvedAlias { url, .. } => url.serialize(serializer),
             RegistryRef::Url(url) => url.serialize(serializer),
             RegistryRef::Alias(alias) => alias.serialize(serializer),
+            RegistryRef::UseDefault => Err(serde::ser::Error::custom(
+                "cannot serialize UseDefault registry reference; it must be resolved first",
+            )),
         }
     }
 }
@@ -159,6 +180,7 @@ impl Display for RegistryRef {
             RegistryRef::Url(url) => write!(f, "{url}"),
             RegistryRef::Alias(alias) => write!(f, "{alias}"),
             RegistryRef::ResolvedAlias { alias, url } => write!(f, "{alias} ({url})"),
+            RegistryRef::UseDefault => write!(f, "<default>"),
         }
     }
 }
