@@ -532,7 +532,9 @@ impl<'a> DependencyGraphBuilder<'a> {
         // Process sub-dependencies first
         let package = if is_root {
             let store = PackageStore::open(&abs_manifest_dir).await?;
-            let package = store.release(&manifest, self.config, Some(deps), false).await?;
+            let package = store
+                .release(&manifest, self.config, Some(deps), false)
+                .await?;
 
             // Ensure that the package version doesn't clash with an existing entry,
             // and that it matches the version requirement in the manifest
