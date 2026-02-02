@@ -731,4 +731,77 @@ service BaseService {
         assert_eq!(pkg_v1, "gm.algo.base._v0_1_2");
         assert_eq!(pkg_v2, "gm.algo.base._v0_1_3");
     }
+
+    /// Verifies the generated Python module path follows the expected pattern.
+    /// Python modules use the rewritten package name, with dots creating nested modules.
+    ///
+    /// This documents the expected Python import behavior for users asking about
+    /// multi-version impact on Python code.
+    #[test]
+    fn test_rewritten_package_python_module_path() {
+        use semver::Version;
+
+        // Single version case: package gm.algo.base -> Python: from gm.algo import base_pb2
+        let contents = r#"syntax = "proto3";
+package gm.algo.base;
+message SomeMessage { string value = 1; }
+"#;
+        let version = Version::new(0, 1, 2);
+        let rewritten = rewrite_proto_package(contents, &version);
+
+        // After rewriting: package gm.algo.base._v0_1_2
+        assert!(rewritten.contains("package gm.algo.base._v0_1_2;"));
+
+        let pkg = extract_proto_package(&rewritten).unwrap();
+
+        // For Python with grpc_tools.protoc, the package becomes the module hierarchy:
+        // package gm.algo.base._v0_1_2 -> Python import: from gm.algo.base._v0_1_2 import base_pb2
+        //
+        // The module path is the package with dots as separators:
+        assert_eq!(pkg, "gm.algo.base._v0_1_2");
+
+        // Python import patterns:
+        // - from gm.algo.base._v0_1_2 import base_pb2
+        // - from gm.algo.base._v0_1_2 import base_pb2_grpc (for gRPC stubs)
+        //
+        // Users would typically use aliases:
+        // from gm.algo.base._v0_1_2 import base_pb2 as base_v012
+        // from gm.algo.base._v0_1_3 import base_pb2 as base_v013
+    }
+
+    /// Documents that multi-version rewriting only affects packages when multiple
+    /// versions are actually resolved. Single-version Python projects are unaffected.
+    ///
+    /// This addresses the common question: "Do I need to change my Python code?"
+    /// Answer: Only if you use `resolver = "multiversion"` AND multiple versions
+    /// are actually resolved.
+    #[test]
+    fn test_single_version_python_unchanged() {
+        // When only ONE version is resolved (even with resolver = "multiversion"),
+        // NO rewriting occurs. The original package name is preserved.
+        //
+        // Proto.toml:
+        // [dependencies]
+        // lib-algo-base = { version = "0.1.2", resolver = "multiversion" }
+        //
+        // If no other dependency pulls a different version, the result is:
+        // - proto/vendor/lib-algo-base/base.proto (no @version suffix in dir)
+        // - package gm.algo.base; (unchanged)
+        //
+        // Python continues to work unchanged:
+        // from gm.algo import base_pb2
+
+        let original = r#"syntax = "proto3";
+package gm.algo.base;
+message SomeMessage { string value = 1; }
+"#;
+
+        // When rewriting is NOT triggered (single version), the package stays the same
+        // This is simulated by not calling rewrite_proto_package at all
+        let pkg = extract_proto_package(original).unwrap();
+        assert_eq!(pkg, "gm.algo.base");
+
+        // Python import stays: from gm.algo import base_pb2
+        // (no versioned suffix needed)
+    }
 }

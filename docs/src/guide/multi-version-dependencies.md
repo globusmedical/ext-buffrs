@@ -120,11 +120,96 @@ use gm::algo::base::_v0_1_2 as algo_old;
 use gm::algo::base::_v0_1_3 as algo_new;
 ```
 
+## Impact on Python Code
+
+**Python projects using single-version dependencies are NOT affected.** Multi-version namespace rewriting ONLY occurs when multiple versions of the same package are actually resolved. If your Python project uses only one version of each dependency (which is the common case for isolated Python scripts), no changes are needed.
+
+**With multi-version enabled, Python imports MUST use versioned module paths.**
+
+The rewritten proto packages result in unique Python module paths:
+
+| Original Proto          | Version | Rewritten Proto                 | Python Module Path                |
+| ----------------------- | ------- | ------------------------------- | --------------------------------- |
+| `package gm.algo.base;` | 0.1.2   | `package gm.algo.base._v0_1_2;` | `gm.algo.base._v0_1_2`            |
+| `package gm.algo.base;` | 0.1.3   | `package gm.algo.base._v0_1_3;` | `gm.algo.base._v0_1_3`            |
+
+### Single-Version Python (No Changes Required)
+
+If your Python project only depends on one version of each API, nothing changes:
+
+```python
+# Proto.toml (single version - no multi-version flag needed)
+# [dependencies]
+# lib-algo-base = { version = "0.1.2", ... }
+
+# Your Python code continues to work unchanged:
+from gm.algo import base_pb2
+msg = base_pb2.SomeMessage()
+```
+
+### Multi-Version Python Consumer Example
+
+When using multi-version, Python imports must reference the versioned module:
+
+```python
+# Proto.toml has:
+# lib-algo-base = { version = "=0.1.2", ..., resolver = "multiversion" }
+# lib-algo-base-new = { package = "lib-algo-base", version = "=0.1.3", ..., resolver = "multiversion" }
+
+# Import from versioned module paths
+from gm.algo.base._v0_1_2 import base_pb2 as base_v012
+from gm.algo.base._v0_1_3 import base_pb2 as base_v013
+
+# Use with version-specific aliases
+msg_old = base_v012.SomeMessage(value="old")
+msg_new = base_v013.SomeMessage(value="new", extra="field")
+
+# Convert between versions if needed
+def upgrade_message(old_msg: base_v012.SomeMessage) -> base_v013.SomeMessage:
+    return base_v013.SomeMessage(
+        value=old_msg.value,
+        extra="default"
+    )
+```
+
+### Python gRPC Services with Multi-Version
+
+```python
+# gRPC stubs also follow the versioned module pattern
+from gm.algo.base._v0_1_2 import service_pb2_grpc as service_v012
+from gm.algo.base._v0_1_3 import service_pb2_grpc as service_v013
+
+# Create clients for different API versions
+channel = grpc.insecure_channel('localhost:50051')
+client_old = service_v012.BaseServiceStub(channel)
+client_new = service_v013.BaseServiceStub(channel)
+```
+
+### Running buffrs install for Python
+
+Python projects typically run `buffrs install` as part of their setup. After installation, run the protobuf compiler to generate Python code:
+
+```bash
+# Install buffrs dependencies
+buffrs install
+
+# Generate Python code from proto files (example using grpc_tools)
+python -m grpc_tools.protoc \
+    -I proto \
+    -I proto/vendor \
+    --python_out=. \
+    --grpc_python_out=. \
+    proto/vendor/lib-algo-base@0.1.2/*.proto \
+    proto/vendor/lib-algo-base@0.1.3/*.proto
+```
+
+The generated `_pb2.py` and `_pb2_grpc.py` files will be placed according to the rewritten package names, creating the versioned module structure automatically.
+
 ## Vendor Layout
 
 When multi-version resolution results in multiple versions of the same package, buffrs uses version-qualified directory names:
 
-```
+```text
 proto/vendor/
 ├── lib-algo-base@0.1.2/
 │   └── ...
@@ -179,17 +264,27 @@ namespace_overlap = "forbidden"
 
 1. **Use sparingly**: Multi-version should be the exception, not the rule. Prefer updating all consumers to a single version when possible.
 
-2. **Plan for versioned namespaces**: When enabling multi-version, anticipate that your C++/Rust code will need to use versioned namespace prefixes like `_v0_1_2`.
+2. **Plan for versioned namespaces**: When enabling multi-version, anticipate that your C++, Rust, and Python code will need to use versioned namespace/module prefixes like `_v0_1_2`.
 
-3. **Create namespace aliases**: Make your code cleaner with namespace aliases:
+3. **Create namespace/module aliases**: Make your code cleaner with aliases:
+
    ```cpp
+   // C++
    namespace algo_v1 = gm::algo::base::_v0_1_2;
    namespace algo_v2 = gm::algo::base::_v0_1_3;
+   ```
+
+   ```python
+   # Python
+   from gm.algo.base._v0_1_2 import base_pb2 as algo_v1
+   from gm.algo.base._v0_1_3 import base_pb2 as algo_v2
    ```
 
 4. **Audit your dependency graph**: Before enabling multi-version, understand why different versions are needed. Sometimes the root cause is an outdated transitive dependency that should be updated.
 
 5. **Test thoroughly**: Multiple versions can introduce subtle runtime issues. Ensure your test coverage includes scenarios with multi-version dependencies.
+
+6. **Isolated Python projects are safe**: If your Python project only uses one version of each dependency, multi-version changes won't affect you. The namespace rewriting only activates when multiple versions are actually resolved.
 
 ## Monorepo Considerations
 
