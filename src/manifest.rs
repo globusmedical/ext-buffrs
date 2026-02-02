@@ -303,7 +303,7 @@ impl Manifest {
         fs::try_exists(MANIFEST_FILE)
             .await
             .into_diagnostic()
-            .wrap_err(FileExistsError(MANIFEST_FILE))
+            .wrap_err(FileExistsError(MANIFEST_FILE.to_string()))
     }
 
     /// Loads the manifest from the current directory

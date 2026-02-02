@@ -44,10 +44,11 @@ pub trait File: Sized + Send + Sync + 'static {
     where
         P: AsRef<Path> + Send + Sync,
     {
-        fs::try_exists(path)
+        let path_ref = path.as_ref();
+        fs::try_exists(path_ref)
             .await
             .into_diagnostic()
-            .wrap_err(FileExistsError(Self::DEFAULT_PATH))
+            .wrap_err(FileExistsError(path_ref.to_string_lossy().into_owned()))
     }
 
     /// Loads the file from the current directory

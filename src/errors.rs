@@ -4,7 +4,7 @@ use crate::ManagedFile;
 
 #[derive(thiserror::Error, Diagnostic, Debug)]
 #[error("failed to determine if {0} file exists")]
-pub(crate) struct FileExistsError(pub &'static str);
+pub(crate) struct FileExistsError(pub String);
 
 #[derive(thiserror::Error, Diagnostic, Debug)]
 #[error("could not write to {0} file")]

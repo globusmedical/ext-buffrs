@@ -21,7 +21,7 @@ use tokio::fs;
 use url::Url;
 
 use crate::{
-    errors::{DeserializationError, FileExistsError, FileNotFound, SerializationError, WriteError},
+    errors::{DeserializationError, FileExistsError, FileNotFound, SerializationError},
     io::File,
     package::{Package, PackageName},
     registry::{RegistryRef, RegistryUri},
@@ -180,7 +180,7 @@ impl Lockfile {
         fs::try_exists(LOCKFILE)
             .await
             .into_diagnostic()
-            .wrap_err(FileExistsError(LOCKFILE))
+            .wrap_err(FileExistsError(LOCKFILE.to_string()))
     }
 
     /// Loads the Lockfile from the current directory
@@ -213,6 +213,17 @@ impl Lockfile {
     /// Only writes the file if the content has changed to avoid
     /// unnecessary timestamp updates that trigger rebuild cascades.
     pub async fn write(&self) -> miette::Result<()> {
+        self.write_to_path(LOCKFILE).await
+    }
+
+    /// Internal helper to write lockfile to a specific path.
+    ///
+    /// Only writes the file if the content has changed to avoid
+    /// unnecessary timestamp updates that trigger rebuild cascades.
+    async fn write_to_path<P: AsRef<Path>>(&self, path: P) -> miette::Result<()> {
+        let path_ref = path.as_ref();
+        let path_str = path_ref.to_string_lossy();
+
         let mut packages: Vec<_> = self
             .packages
             .iter()
@@ -236,7 +247,7 @@ impl Lockfile {
             .wrap_err(SerializationError(ManagedFile::Lock))?;
 
         // Check if file exists and content is unchanged
-        if let Ok(existing_content) = fs::read_to_string(LOCKFILE).await {
+        if let Ok(existing_content) = fs::read_to_string(path_ref).await {
             if existing_content == new_content {
                 // Content unchanged - skip write to preserve timestamp
                 return Ok(());
@@ -244,10 +255,10 @@ impl Lockfile {
         }
 
         // Content changed or file doesn't exist - write it
-        fs::write(LOCKFILE, new_content.into_bytes())
+        fs::write(path_ref, new_content.into_bytes())
             .await
             .into_diagnostic()
-            .wrap_err(WriteError(LOCKFILE))
+            .wrap_err(miette!("failed to write lockfile to {}", path_str))
     }
 
     /// Locates a given package in the Lockfile
@@ -341,43 +352,7 @@ impl File for Lockfile {
     where
         P: AsRef<Path> + Send + Sync,
     {
-        let path_str = path.as_ref().to_string_lossy().to_string();
-
-        let mut packages: Vec<_> = self
-            .packages
-            .iter()
-            .map(|pkg| {
-                let mut locked = pkg.clone();
-                locked.dependencies.sort();
-                locked.dependencies_resolved.sort();
-                locked
-            })
-            .collect();
-
-        packages.sort();
-
-        let raw = RawLockfile {
-            version: 1,
-            packages,
-        };
-
-        let new_content = toml::to_string(&raw)
-            .into_diagnostic()
-            .wrap_err(SerializationError(ManagedFile::Lock))?;
-
-        // Check if file exists and content is unchanged
-        if let Ok(existing_content) = fs::read_to_string(path.as_ref()).await {
-            if existing_content == new_content {
-                // Content unchanged - skip write to preserve timestamp
-                return Ok(());
-            }
-        }
-
-        // Content changed or file doesn't exist - write it
-        fs::write(path.as_ref(), new_content.into_bytes())
-            .await
-            .into_diagnostic()
-            .wrap_err(miette!("failed to write lockfile to {}", path_str))
+        self.write_to_path(path).await
     }
 }
 
