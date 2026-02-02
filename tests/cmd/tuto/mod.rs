@@ -8,6 +8,9 @@ fn fixture() {
         let buffrs_home = vfs.root().join("$HOME");
         let cwd = vfs.root();
 
+        let protoc = protoc_bin_vendored::protoc_bin_path()
+            .expect("failed to locate vendored protoc binary for tests");
+
         // Units Library
         {
             // mkdir units
@@ -185,6 +188,7 @@ fn fixture() {
             // cargo build
             assert!(Command::new("cargo")
                 .arg("build")
+                .env("PROTOC", &protoc)
                 .current_dir(&cwd)
                 .status()
                 .unwrap()

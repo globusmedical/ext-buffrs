@@ -35,6 +35,10 @@ pub mod integration;
 pub mod lock;
 /// Manifest format and IO
 pub mod manifest;
+/// Metadata emission for build system integration
+pub mod metadata;
+/// Namespace scanning for protobuf files
+pub mod namespace_scan;
 /// Packages formats and utilities
 pub mod package;
 /// Supported registries

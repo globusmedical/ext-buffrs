@@ -1,0 +1,7 @@
+syntax = "proto3";
+
+package idempotent.test;
+
+message SampleMessage {
+    string id = 1;
+}

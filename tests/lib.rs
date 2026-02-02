@@ -111,6 +111,10 @@ impl VirtualFileSystem {
 
             let filter_proto_toml_orig = |f: &PathBuf| !f.ends_with("Proto.toml.orig");
 
+            // Skip _buffrs_meta/ directory as its content is dynamically generated
+            let filter_buffrs_meta =
+                |f: &PathBuf| !f.components().any(|c| c.as_os_str() == "_buffrs_meta");
+
             let mut actual_files: Vec<PathBuf> = vfs
                 .files
                 .iter()
@@ -119,6 +123,7 @@ impl VirtualFileSystem {
                 .filter(filter_vhome)
                 .filter(filter_gitkeep)
                 .filter(filter_proto_toml_orig)
+                .filter(filter_buffrs_meta)
                 .collect();
 
             actual_files.sort();
@@ -131,6 +136,7 @@ impl VirtualFileSystem {
                 .filter(filter_vhome)
                 .filter(filter_gitkeep)
                 .filter(filter_proto_toml_orig)
+                .filter(filter_buffrs_meta)
                 .collect();
 
             expected_files.sort();
@@ -208,7 +214,7 @@ impl FileType {
     pub fn from_extension(ext: impl AsRef<str>) -> Self {
         match ext.as_ref() {
             "tgz" => Self::Package,
-            "proto" | "toml" | "lock" => Self::Text,
+            "proto" | "toml" | "lock" | "json" | "cmake" => Self::Text,
             other => panic!("unrecognized extension type: {other}"),
         }
     }

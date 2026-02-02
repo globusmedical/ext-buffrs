@@ -18,9 +18,13 @@ file -- specifically, the version, registry and repository provided for each
 dependency. Each dependency may specify its own dependencies, via its manifest
 file, which will also be downloaded and its contents unpacked flatly to the
 local filesystem, under the shared `proto/vendor` path prefix (see [Project
-Layout](../guide/project-layout.md) for more information). Only one version of
-each package can be installed, so if there is a conflicting requirement,
-installation will fail.
+Layout](../guide/project-layout.md) for more information).
+
+By default, only one version of each package can be installed. If there is a
+conflicting requirement, installation will fail. However, starting with buffrs
+1.0.0, you can enable [multi-version dependencies](../guide/multi-version-dependencies.md)
+by adding `resolver = "multiversion"` to allow multiple versions of a package
+to coexist.
 
 Once installation has completed, the resolved packages versions will be frozen
 and captured in a `Proto.lock` file, which ensures that future installations

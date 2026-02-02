@@ -26,7 +26,7 @@ use crate::{
     config::Config,
     manifest::{Manifest, PackageManifest, MANIFEST_FILE},
     package::{Package, PackageName, PackageType},
-    resolver::DependencyGraph,
+    resolver::{DependencyGraph, ResolvedPackageId},
 };
 
 /// IO abstraction layer over local `buffrs` package store
@@ -115,6 +115,31 @@ impl PackageStore {
         Ok(())
     }
 
+    /// Unpacks a resolved package instance into the vendor directory.
+    ///
+    /// When multi-version mode is enabled for this package (either multiple versions resolved
+    /// or explicit `resolver = "multiversion"` on the dependency), the destination folder
+    /// includes the resolved version to prevent overwriting other versions.
+    pub async fn unpack_resolved(
+        &self,
+        package: &Package,
+        id: &ResolvedPackageId,
+        graph: &DependencyGraph,
+    ) -> miette::Result<()> {
+        let pkg_dir = self.locate_resolved(id, graph);
+
+        package.unpack(&pkg_dir).await?;
+
+        tracing::debug!(":: unpacked {} into {}", id, pkg_dir.display());
+
+        Ok(())
+    }
+
+    /// Directory for the vendored installation of a resolved package instance.
+    pub fn locate_resolved(&self, id: &ResolvedPackageId, graph: &DependencyGraph) -> PathBuf {
+        self.proto_vendor_path().join(id.vendor_dir_name(graph))
+    }
+
     /// Uninstalls a package from the local file system
     pub async fn uninstall(&self, package: &PackageName) -> miette::Result<()> {
         let pkg_dir = self.proto_vendor_path().join(&**package);
@@ -182,7 +207,7 @@ impl PackageStore {
     ) -> miette::Result<Package> {
         for dependency in manifest.dependencies.iter() {
             let resolved = if let Some(deps) = deps {
-                deps.get(&dependency.package)
+                deps.get_single_by_name(&dependency.package)
                     .map(|dep| dep.package().manifest.clone())
             } else {
                 None

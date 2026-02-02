@@ -1,4 +1,4 @@
-edition = "0.10"
+edition = "0.50"
 
 [package]
 type = "lib"

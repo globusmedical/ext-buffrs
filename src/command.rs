@@ -17,17 +17,19 @@ use crate::{
     config::Config,
     credentials::Credentials,
     integration::{buf_yaml, path_util::PathUtil},
-    lock::{LockedPackage, Lockfile},
+    lock::{LockedDependency, LockedPackage, Lockfile},
     manifest::{Dependency, Manifest, PackageManifest, MANIFEST_FILE},
+    metadata, namespace_scan,
     package::{Package, PackageName, PackageStore, PackageType},
-    registry::{Artifactory, CertValidationPolicy, RegistryRef, RegistryUri},
-    resolver::{DependencyGraph, DependencyGraphBuilder, ResolvedDependency},
+    registry::{build_reqwest_client, Artifactory, CertValidationPolicy, RegistryRef, RegistryUri},
+    resolver::{DependencyGraph, DependencyGraphBuilder, ResolvedDependency, ResolvedPackageId},
 };
 
 use async_recursion::async_recursion;
 use miette::{bail, ensure, miette, Context, IntoDiagnostic};
 use semver::{Version, VersionReq};
 use std::{
+    collections::HashMap,
     env,
     path::{Path, PathBuf},
     str::FromStr,
@@ -345,15 +347,17 @@ pub async fn publish(
     }
 
     #[cfg(feature = "git")]
-    if let Ok(statuses) = git_statuses().await {
-        if !allow_dirty && !statuses.is_empty() {
-            tracing::error!("{} files in the working directory contain changes that were not yet committed into git:\n", statuses.len());
+    if env::var(BUFFRS_TESTSUITE_VAR).is_err() {
+        if let Ok(statuses) = git_statuses().await {
+            if !allow_dirty && !statuses.is_empty() {
+                tracing::error!("{} files in the working directory contain changes that were not yet committed into git:\n", statuses.len());
 
-            statuses.iter().for_each(|s| tracing::error!("{}", s));
+                statuses.iter().for_each(|s| tracing::error!("{}", s));
 
-            tracing::error!("\nTo proceed with publishing despite the uncommitted changes, pass the `--allow-dirty` flag\n");
+                tracing::error!("\nTo proceed with publishing despite the uncommitted changes, pass the `--allow-dirty` flag\n");
 
-            bail!("attempted to publish a dirty repository");
+                bail!("attempted to publish a dirty repository");
+            }
         }
     }
 
@@ -385,6 +389,46 @@ pub enum GenerationOption {
     BufYaml,
 }
 
+/// Rewrites proto package declarations in all .proto files in a directory.
+///
+/// This adds a version suffix to the package declarations to enable safe
+/// multi-version coexistence. For example:
+/// - `package gm.algo.base;` becomes `package gm.algo.base._v0_1_2;`
+///
+/// # Arguments
+/// * `dir` - Directory containing .proto files to rewrite
+/// * `version` - Version to use for the suffix
+async fn rewrite_proto_namespaces_in_dir(dir: &Path, version: &Version) -> miette::Result<()> {
+    use walkdir::WalkDir;
+
+    // Collect all proto file paths first to avoid holding WalkDir handles while writing
+    let proto_files: Vec<_> = WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().map_or(false, |ext| ext == "proto"))
+        .map(|e| e.path().to_path_buf())
+        .collect();
+
+    for path in proto_files {
+        let contents = tokio::fs::read_to_string(&path)
+            .await
+            .into_diagnostic()
+            .wrap_err(miette!("failed to read proto file {}", path.display()))?;
+
+        let rewritten = namespace_scan::rewrite_proto_package(&contents, version);
+
+        // Only write if content changed
+        if rewritten != contents {
+            tokio::fs::write(&path, rewritten)
+                .await
+                .into_diagnostic()
+                .wrap_err(miette!("failed to write proto file {}", path.display()))?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Installs dependencies
 ///
 /// # Arguments
@@ -403,11 +447,22 @@ pub async fn install(
     let credentials = Credentials::load().await?;
     let cache = Cache::open().await?;
 
+    // Build a shared HTTP client for connection pooling
+    let http_client = build_reqwest_client(policy)?;
+
     store.clear().await?;
+
+    // Track whether we installed the local package itself (InstallMode::All)
+    let mut installed_local: Option<(ResolvedPackageId, PathBuf)> = None;
 
     if let InstallMode::All = mode {
         if let Some(ref pkg) = manifest.package {
             store.populate(pkg).await?;
+
+            installed_local = Some((
+                ResolvedPackageId::new(pkg.name.clone(), pkg.version.clone()),
+                store.locate(&pkg.name),
+            ));
 
             tracing::info!(":: installed {}@{}", pkg.name, pkg.version);
         }
@@ -415,33 +470,56 @@ pub async fn install(
 
     let dependency_graph =
         DependencyGraphBuilder::new(&manifest, &lockfile, &credentials, &cache, config, policy)
+            .with_client(http_client)
             .build()
             .await
             .wrap_err(miette!("dependency resolution failed"))?;
 
     let mut locked = Vec::new();
+    let mut visited = std::collections::HashSet::new();
 
     #[async_recursion]
     async fn traverse_and_install(
-        name: &PackageName,
+        id: &ResolvedPackageId,
         graph: &DependencyGraph,
         store: &PackageStore,
         locked: &mut Vec<LockedPackage>,
+        visited: &mut std::collections::HashSet<ResolvedPackageId>,
         prefix: String,
     ) -> miette::Result<()> {
-        let resolved = graph.get(name).ok_or(miette!(
+        // Skip if already visited (avoids duplicates in diamond dependencies)
+        if !visited.insert(id.clone()) {
+            return Ok(());
+        }
+
+        let resolved = graph.get(id).ok_or(miette!(
             "unexpected error: missing dependency in dependency graph"
         ))?;
 
-        store.unpack(resolved.package()).await.wrap_err(miette!(
-            "failed to unpack package {}",
-            &resolved.package().name()
-        ))?;
+        store
+            .unpack_resolved(resolved.package(), id, graph)
+            .await
+            .wrap_err(miette!(
+                "failed to unpack package {}",
+                &resolved.package().name()
+            ))?;
+
+        // Rewrite proto namespaces if multi-version and policy is Rewrite
+        if graph.needs_namespace_rewrite(id) {
+            let pkg_dir = store.locate_resolved(id, graph);
+            rewrite_proto_namespaces_in_dir(&pkg_dir, id.version()).await?;
+            tracing::info!(
+                "{} rewrote namespaces for {}@{} (multi-version)",
+                if prefix.is_empty() { "::" } else { &prefix },
+                id.name(),
+                id.version()
+            );
+        }
 
         tracing::info!(
             "{} installed {}@{}",
             if prefix.is_empty() { "::" } else { &prefix },
-            name,
+            resolved.package().name(),
             resolved.package().version()
         );
 
@@ -453,7 +531,20 @@ pub async fn install(
             ..
         } = &resolved
         {
-            locked.push(package.lock(registry.clone(), repository.clone(), dependants.len()));
+            let resolved_deps: Vec<LockedDependency> = resolved
+                .depends_on()
+                .iter()
+                .map(|dep| LockedDependency {
+                    name: dep.name().clone(),
+                    version: dep.version().clone(),
+                })
+                .collect();
+
+            locked.push(
+                package
+                    .lock(registry.clone(), repository.clone(), dependants.len())
+                    .with_resolved_dependencies(resolved_deps),
+            );
         }
 
         for (index, dependency) in resolved.depends_on().iter().enumerate() {
@@ -468,22 +559,199 @@ pub async fn install(
                 if prefix.is_empty() { "  " } else { &prefix }
             );
 
-            traverse_and_install(dependency, graph, store, locked, new_prefix).await?;
+            traverse_and_install(dependency, graph, store, locked, visited, new_prefix).await?;
         }
 
         Ok(())
     }
 
-    for dependency in &manifest.dependencies {
+    for dependency in dependency_graph.roots() {
         traverse_and_install(
-            &dependency.package,
+            dependency,
             &dependency_graph,
             &store,
             &mut locked,
+            &mut visited,
             String::new(),
         )
         .await?;
     }
+
+    /// Validates config orthogonality (DR-BUFFRS-1420).
+    ///
+    /// Warns if the lockfile has multiversion packages but the manifest no longer
+    /// grants multiversion permission for them.
+    fn check_config_orthogonality(manifest: &Manifest, lockfile: &Lockfile) {
+        let lock_state = lockfile.multiversion_state();
+        if !lock_state.has_multiversion() {
+            return;
+        }
+
+        // Build set of packages that manifest allows multiversion for
+        let manifest_multiversion: std::collections::HashSet<PackageName> = manifest
+            .dependencies
+            .iter()
+            .filter(|dep| dep.allows_multiversion())
+            .map(|dep| dep.package.clone())
+            .collect();
+
+        for pkg_name in &lock_state.multiversion_packages {
+            if !manifest_multiversion.contains(pkg_name) {
+                tracing::warn!(
+                    ":: WARNING: lockfile has multiple versions of '{}' but manifest does not grant multiversion permission",
+                    pkg_name
+                );
+                tracing::warn!(
+                    "   Consider adding `resolver = \"multiversion\"` to the dependency, or deleting Proto.lock to re-resolve"
+                );
+            }
+        }
+    }
+
+    check_config_orthogonality(&manifest, &lockfile);
+
+    async fn ensure_multi_version_link_safety(
+        graph: &DependencyGraph,
+        store: &PackageStore,
+        installed_local: &Option<(ResolvedPackageId, PathBuf)>,
+        config: &Config,
+    ) -> miette::Result<()> {
+        // Check if any multiversion is in play (global flag or per-dependency)
+        let has_multiversion =
+            graph.allow_multiple_versions() || !graph.multiversion_permitted.is_empty();
+
+        if !has_multiversion {
+            return Ok(());
+        }
+
+        if config.skip_link_safety_check() {
+            tracing::warn!(
+                ":: WARNING: skip_link_safety_check is enabled; proto namespace collisions are NOT being checked"
+            );
+            return Ok(());
+        }
+
+        use crate::manifest::NamespaceOverlapPolicy;
+
+        // protobuf namespace -> (resolved id, file path, content hash)
+        let mut seen: HashMap<String, (ResolvedPackageId, PathBuf, String)> = HashMap::new();
+
+        let mut modules: Vec<(ResolvedPackageId, PathBuf)> = graph
+            .keys()
+            .cloned()
+            .map(|id| {
+                let path = store.locate_resolved(&id, graph);
+                (id, path)
+            })
+            .collect();
+
+        if let Some((id, path)) = installed_local {
+            modules.push((id.clone(), path.clone()));
+        }
+
+        // Deterministic order for errors.
+        modules.sort_by(|(a, _), (b, _)| a.to_string().cmp(&b.to_string()));
+
+        for (id, module_root) in modules {
+            for proto in store.collect(&module_root, true).await {
+                let contents = tokio::fs::read_to_string(&proto)
+                    .await
+                    .into_diagnostic()
+                    .wrap_err(miette!("failed to read proto file {}", proto.display()))?;
+
+                let pkg = namespace_scan::extract_proto_package(&contents)
+                    .unwrap_or_else(|| "<no package>".into());
+
+                let content_hash = namespace_scan::content_hash(&contents);
+
+                if let Some((other_id, other_file, other_hash)) = seen.get(&pkg) {
+                    if other_id != &id {
+                        // Namespace collision detected - check policies
+                        let policy = graph.namespace_policy(id.name());
+                        let other_policy = graph.namespace_policy(other_id.name());
+
+                        // Use the most permissive policy between the two
+                        // Rewrite is default and should have already disambiguated, but we check anyway
+                        let effective_policy = match (&policy, &other_policy) {
+                            (NamespaceOverlapPolicy::Rewrite, _)
+                            | (_, NamespaceOverlapPolicy::Rewrite) => {
+                                NamespaceOverlapPolicy::Rewrite
+                            }
+                            (NamespaceOverlapPolicy::IdenticalOnly, _)
+                            | (_, NamespaceOverlapPolicy::IdenticalOnly) => {
+                                NamespaceOverlapPolicy::IdenticalOnly
+                            }
+                            _ => NamespaceOverlapPolicy::Forbidden,
+                        };
+
+                        match effective_policy {
+                            NamespaceOverlapPolicy::Rewrite => {
+                                // With Rewrite policy, namespaces should have been rewritten during install.
+                                // A collision here means rewriting didn't apply or these are shared types.
+                                // Check if content is identical (shared base types are OK).
+                                if &content_hash != other_hash {
+                                    tracing::warn!(
+                                        ":: namespace collision after rewrite: '{}' declared by {} and {} with different content",
+                                        pkg, other_id, id
+                                    );
+                                    tracing::warn!(
+                                        "   This may indicate a bug in namespace rewriting or incompatible shared types"
+                                    );
+                                } else {
+                                    tracing::debug!(
+                                        ":: namespace overlap (identical content): '{}' in {} and {}",
+                                        pkg, other_id, id
+                                    );
+                                }
+                            }
+                            NamespaceOverlapPolicy::IdenticalOnly => {
+                                // DR-BUFFRS-1520: Check content identity
+                                if &content_hash != other_hash {
+                                    bail!(miette!(
+                                        "multi-version install is not link-safe: protobuf namespace '{}' has different content\n\
+                                         - {} (e.g. {}) hash: {}...\n\
+                                         - {} (e.g. {}) hash: {}...\n\
+                                         \n\
+                                         The `identical_only` policy requires identical proto file contents.\n\
+                                         Consider using the default `rewrite` policy to auto-disambiguate namespaces.",
+                                        pkg,
+                                        other_id, other_file.display(), &other_hash[..16],
+                                        id, proto.display(), &content_hash[..16]
+                                    ));
+                                }
+                                tracing::info!(
+                                    ":: namespace overlap identical: '{}' in {} and {} (content matches)",
+                                    pkg, other_id, id
+                                );
+                            }
+                            NamespaceOverlapPolicy::Forbidden => {
+                                bail!(miette!(
+                                    "multi-version install is not link-safe: protobuf package namespace '{}' is declared by both {} (e.g. {}) and {} (e.g. {})\n\
+                                     \n\
+                                     Options:\n\
+                                     - Use the default `rewrite` policy to auto-disambiguate namespaces\n\
+                                     - Add `namespace_overlap = \"identical_only\"` if content is the same\n\
+                                     - Restructure dependencies to avoid the collision",
+                                    pkg,
+                                    other_id, other_file.display(),
+                                    id, proto.display()
+                                ));
+                            }
+                        }
+                    }
+                } else {
+                    seen.insert(pkg, (id.clone(), proto.clone(), content_hash));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    ensure_multi_version_link_safety(&dependency_graph, &store, &installed_local, config).await?;
+
+    // Emit metadata for build system integration
+    metadata::emit_metadata(&dependency_graph, &store.proto_vendor_path()).await?;
 
     for option in generation {
         match option {

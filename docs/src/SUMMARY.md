@@ -20,6 +20,7 @@
     * [Project Layout](guide/project-layout.md)
     * [Manifest vs Lockfile](guide/manifest-vs-lockfile.md)
     * [Buffrs Home](guide/buffrs-home.md)
+    * [Multi-Version Dependencies](guide/multi-version-dependencies.md)
 
 * [Buffrs Integrations]()
     * [Cargo]()

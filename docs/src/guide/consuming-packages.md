@@ -35,7 +35,7 @@ type = "lib"
 version = "1.0.0"
 
 [dependencies]
-google = { version = "=1.0.0", registry = "<your-registry>", repository = "<your-repository> }
+google = { version = "=1.0.0", registry = "<your-registry>", repository = "<your-repository>" }
 ```
 
 Running `buffrs install` yields you with the following filesystem:
@@ -65,8 +65,22 @@ major difference is the lack of the `[package]` section in your manifest.
 
 ```
 [dependencies]
-logging = { version = "=1.0.0", registry = "<your-registry>", repository = "<your-repository> }
+logging = { version = "=1.0.0", registry = "<your-registry>", repository = "<your-repository>" }
 ```
+
+##### Multi-Version Dependencies
+
+In larger projects, you may need different parts of your codebase to use
+different versions of the same package. Starting with buffrs 1.0.0, you can
+enable this with `resolver = "multiversion"`:
+
+```toml
+[dependencies]
+logging-v1 = { package = "logging", version = "=1.0.0", resolver = "multiversion", registry = "<your-registry>", repository = "<your-repository>" }
+logging-v2 = { package = "logging", version = "=2.0.0", resolver = "multiversion", registry = "<your-registry>", repository = "<your-repository>" }
+```
+
+See [Multi-Version Dependencies](./multi-version-dependencies.md) for complete documentation.
 
 Running a `buffrs install` yields you the very same as above, except for the
 omitted local package and the `logging` dependency instead of `time`.

@@ -35,6 +35,64 @@ pub enum CertValidationPolicy {
     NoValidation,
 }
 
+/// Environment variable for specifying a custom CA bundle file
+pub const ENV_CA_BUNDLE: &str = "BUFFRS_CA_BUNDLE";
+
+/// Builds a configured reqwest::Client for Artifactory operations.
+///
+/// This helper ensures consistent TLS and redirect configuration across all
+/// Artifactory clients. Use this when creating a shared client to be passed
+/// to multiple `Artifactory::new_with_client` calls.
+///
+/// # CA Certificate Configuration
+///
+/// The client can be configured to use a custom CA certificate bundle by
+/// setting the `BUFFRS_CA_BUNDLE` environment variable to the path of a
+/// PEM-encoded certificate file. This is useful for:
+/// - Corporate environments with internal CAs
+/// - Self-signed certificates
+/// - Custom PKI setups
+///
+/// If `BUFFRS_CA_BUNDLE` is set but the file cannot be read, an error is returned.
+pub fn build_reqwest_client(policy: CertValidationPolicy) -> miette::Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .danger_accept_invalid_certs(policy == CertValidationPolicy::NoValidation);
+
+    // Check for custom CA bundle from environment variable
+    if let Ok(ca_bundle_path) = std::env::var(ENV_CA_BUNDLE) {
+        if !ca_bundle_path.is_empty() {
+            let ca_bundle_path = std::path::Path::new(&ca_bundle_path);
+            let cert_pem = std::fs::read(ca_bundle_path)
+                .into_diagnostic()
+                .wrap_err(miette!(
+                    "failed to read CA bundle from {} (set via {})",
+                    ca_bundle_path.display(),
+                    ENV_CA_BUNDLE
+                ))?;
+
+            // Parse the PEM file which may contain multiple certificates
+            for cert in reqwest::Certificate::from_pem_bundle(&cert_pem)
+                .into_diagnostic()
+                .wrap_err(miette!(
+                    "failed to parse CA certificates from {}",
+                    ca_bundle_path.display()
+                ))?
+            {
+                builder = builder.add_root_certificate(cert);
+            }
+
+            tracing::debug!(
+                "loaded custom CA bundle from {} ({})",
+                ca_bundle_path.display(),
+                ENV_CA_BUNDLE
+            );
+        }
+    }
+
+    builder.build().into_diagnostic()
+}
+
 /// The registry implementation for artifactory
 #[derive(Debug, Clone)]
 pub struct Artifactory {
@@ -55,13 +113,25 @@ impl Artifactory {
         credentials: &Credentials,
         policy: CertValidationPolicy,
     ) -> miette::Result<Self> {
-        let token = credentials.registry_tokens.get(&registry).cloned();
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .danger_accept_invalid_certs(policy == CertValidationPolicy::NoValidation)
-            .build()
-            .into_diagnostic()?;
+        let client = build_reqwest_client(policy)?;
+        Self::new_with_client(registry, credentials, client)
+    }
 
+    /// Creates a new instance with a pre-built reqwest::Client.
+    ///
+    /// Use this when you want to share a connection pool across multiple
+    /// Artifactory clients within the same invocation.
+    ///
+    /// # Arguments
+    /// * `registry` - The registry URI
+    /// * `credentials` - The credentials to use for the registry
+    /// * `client` - A pre-configured reqwest::Client (use `build_reqwest_client`)
+    pub fn new_with_client(
+        registry: RegistryUri,
+        credentials: &Credentials,
+        client: reqwest::Client,
+    ) -> miette::Result<Self> {
+        let token = credentials.registry_tokens.get(&registry).cloned();
         Ok(Self {
             registry,
             token,
@@ -252,6 +322,37 @@ impl Artifactory {
             "unexpected error: failed to construct artifact URL"
         ))?;
 
+        // Check if artifact already exists (idempotent publish)
+        let check_response = self
+            .new_request(Method::HEAD, artifact_uri.clone())
+            .send_raw()
+            .await?;
+
+        let status = check_response.status();
+        if status.is_success() {
+            // Artifact already exists - skip upload
+            tracing::info!(
+                ":: skipped {}/{}@{} (already published)",
+                repository,
+                package.name(),
+                package.version()
+            );
+            return Ok(());
+        } else if status == reqwest::StatusCode::NOT_FOUND {
+            // Artifact does not exist - proceed with upload
+        } else if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(miette!(
+                "unauthorized - please provide registry credentials with `buffrs login`"
+            ));
+        } else {
+            // Unexpected status
+            return Err(miette!(
+                "unexpected status {} when checking if artifact exists at {}",
+                status,
+                artifact_uri
+            ));
+        }
+
         let _ = self
             .new_request(Method::PUT, artifact_uri)
             .body(package.tgz.clone())
@@ -288,6 +389,12 @@ impl RequestBuilder {
 
     async fn send(self) -> miette::Result<ValidatedResponse> {
         self.0.send().await.into_diagnostic()?.try_into()
+    }
+
+    /// Send request and return raw response without validation.
+    /// Used for checking artifact existence where 404 is an expected outcome.
+    async fn send_raw(self) -> miette::Result<reqwest::Response> {
+        self.0.send().await.into_diagnostic()
     }
 }
 

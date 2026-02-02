@@ -1,9 +1,9 @@
 use async_recursion::async_recursion;
 use miette::{bail, ensure, Context, Diagnostic, IntoDiagnostic};
-use semver::VersionReq;
+use semver::{Version, VersionReq};
 use std::{
     collections::HashMap,
-    env,
+    env, fmt,
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
 };
@@ -15,12 +15,60 @@ use crate::{
     credentials::Credentials,
     lock::{FileRequirement, Lockfile},
     manifest::{
-        Dependency, DependencyManifest, LocalDependencyManifest, Manifest,
-        RemoteDependencyManifest, MANIFEST_FILE,
+        Dependency, DependencyManifest, LocalDependencyManifest, Manifest, NamespaceOverlapPolicy,
+        RemoteDependencyManifest, ResolverMode, MANIFEST_FILE,
     },
     package::{Package, PackageName, PackageStore},
-    registry::{Artifactory, CertValidationPolicy, RegistryRef},
+    registry::{Artifactory, CertValidationPolicy, RegistryRef, RegistryUri},
 };
+
+/// Uniquely identifies a resolved package instance.
+///
+/// In the default mode buffrs resolves at most one version per package name. When
+/// `Config::allow_multiple_versions()` is enabled, the resolver may keep multiple
+/// resolved versions of the same package name side-by-side.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedPackageId {
+    name: PackageName,
+    version: Version,
+}
+
+impl ResolvedPackageId {
+    pub fn new(name: PackageName, version: Version) -> Self {
+        Self { name, version }
+    }
+
+    pub fn name(&self) -> &PackageName {
+        &self.name
+    }
+
+    pub fn version(&self) -> &Version {
+        &self.version
+    }
+
+    /// Returns the directory name for this package in the vendor folder.
+    ///
+    /// Returns a version-qualified name (`name@version`) when multiple versions
+    /// of this package are actually resolved in the graph.
+    ///
+    /// Note: The `resolver = "multiversion"` setting only grants *permission* to
+    /// have multiple versions; it doesn't force version-qualified names when
+    /// there's only one version.
+    pub fn vendor_dir_name(&self, graph: &DependencyGraph) -> String {
+        // Only use version-qualified names when there are actually multiple versions
+        if graph.ids_for_name(&self.name).len() > 1 {
+            format!("{}@{}", self.name, self.version)
+        } else {
+            self.name.to_string()
+        }
+    }
+}
+
+impl fmt::Display for ResolvedPackageId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}@{}", self.name, self.version)
+    }
+}
 
 /// Represents a dependency contextualized by the current dependency graph
 #[derive(Debug, Clone)]
@@ -36,7 +84,7 @@ pub enum ResolvedDependency {
         /// Packages that requested this dependency (and what versions they accept)
         dependants: Vec<Dependant>,
         /// Transitive dependencies
-        depends_on: Vec<PackageName>,
+        depends_on: Vec<ResolvedPackageId>,
     },
     /// A resolved dependency that is located on the filesystem
     Local {
@@ -47,7 +95,7 @@ pub enum ResolvedDependency {
         /// Packages that requested this dependency (and what versions they accept)
         dependants: Vec<Dependant>,
         /// Transitive dependencies
-        depends_on: Vec<PackageName>,
+        depends_on: Vec<ResolvedPackageId>,
     },
 }
 
@@ -59,10 +107,17 @@ impl ResolvedDependency {
         }
     }
 
-    pub(crate) fn depends_on(&self) -> &[PackageName] {
+    pub(crate) fn depends_on(&self) -> &[ResolvedPackageId] {
         match self {
             Self::Remote { depends_on, .. } => depends_on,
             Self::Local { depends_on, .. } => depends_on,
+        }
+    }
+
+    pub(crate) fn dependants(&self) -> &[Dependant] {
+        match self {
+            Self::Remote { dependants, .. } => dependants,
+            Self::Local { dependants, .. } => dependants,
         }
     }
 }
@@ -74,12 +129,23 @@ pub struct Dependant {
     pub name: PackageName,
     /// Version requirement
     pub version_req: VersionReq,
+    /// Whether this edge allows multi-version resolution
+    pub allows_multiversion: bool,
+    /// Namespace overlap policy for this edge
+    pub namespace_overlap_policy: NamespaceOverlapPolicy,
 }
 
 /// Represents direct and transitive dependencies of the root package
 #[derive(Debug, Clone, Default)]
 pub struct DependencyGraph {
-    pub(crate) entries: HashMap<PackageName, ResolvedDependency>,
+    /// Global flag to allow multiple versions (from config, deprecated)
+    pub(crate) allow_multiple_versions: bool,
+    /// Set of package names that have at least one edge with multiversion permission
+    pub(crate) multiversion_permitted: std::collections::HashSet<PackageName>,
+    /// Namespace overlap policies per package name (most permissive wins)
+    pub(crate) namespace_policies: HashMap<PackageName, NamespaceOverlapPolicy>,
+    pub(crate) roots: Vec<ResolvedPackageId>,
+    pub(crate) entries: HashMap<ResolvedPackageId, ResolvedDependency>,
 }
 
 /// A builder for constructing a dependency graph
@@ -90,6 +156,8 @@ pub struct DependencyGraphBuilder<'a> {
     cache: &'a Cache,
     config: &'a Config,
     policy: CertValidationPolicy,
+    /// Optional shared HTTP client for connection pooling
+    client: Option<reqwest::Client>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -108,7 +176,7 @@ impl From<RemoteDependency> for Dependency {
 }
 
 impl Deref for DependencyGraph {
-    type Target = HashMap<PackageName, ResolvedDependency>;
+    type Target = HashMap<ResolvedPackageId, ResolvedDependency>;
 
     fn deref(&self) -> &Self::Target {
         &self.entries
@@ -135,20 +203,137 @@ struct DownloadError {
 }
 
 impl DependencyGraph {
-    /// Locates and returns a reference to a resolved dependency package by its name
-    pub fn get(&self, name: &PackageName) -> Option<&ResolvedDependency> {
-        self.entries.get(name)
+    pub fn new(allow_multiple_versions: bool) -> Self {
+        Self {
+            allow_multiple_versions,
+            multiversion_permitted: std::collections::HashSet::new(),
+            namespace_policies: HashMap::new(),
+            roots: Vec::new(),
+            entries: HashMap::new(),
+        }
     }
 
-    /// Returns a list of all package names in the dependency graph
-    pub fn get_package_names(&self) -> Vec<PackageName> {
-        self.entries.keys().cloned().collect()
+    /// Locates and returns a reference to a resolved dependency package by its id.
+    pub fn get(&self, id: &ResolvedPackageId) -> Option<&ResolvedDependency> {
+        self.entries.get(id)
+    }
+
+    /// Locates and returns a mutable reference to a resolved dependency package by its id.
+    pub fn get_mut(&mut self, id: &ResolvedPackageId) -> Option<&mut ResolvedDependency> {
+        self.entries.get_mut(id)
+    }
+
+    /// Returns the resolved root dependencies corresponding to the root manifest dependencies.
+    pub fn roots(&self) -> &[ResolvedPackageId] {
+        &self.roots
+    }
+
+    /// Returns true if multi-version is globally enabled (deprecated config flag).
+    pub fn allow_multiple_versions(&self) -> bool {
+        self.allow_multiple_versions
+    }
+
+    /// Returns true if multi-version is permitted for a specific package name.
+    ///
+    /// This checks both the global config flag and per-dependency opt-in.
+    pub fn is_multiversion_permitted(&self, name: &PackageName) -> bool {
+        self.allow_multiple_versions || self.multiversion_permitted.contains(name)
+    }
+
+    /// Returns the effective namespace overlap policy for a package name.
+    ///
+    /// If multiple edges specify different policies, the most permissive wins.
+    pub fn namespace_policy(&self, name: &PackageName) -> NamespaceOverlapPolicy {
+        self.namespace_policies
+            .get(name)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Grant multi-version permission for a package name.
+    pub fn permit_multiversion(&mut self, name: &PackageName) {
+        self.multiversion_permitted.insert(name.clone());
+    }
+
+    /// Update namespace policy for a package name (most permissive wins).
+    pub fn update_namespace_policy(&mut self, name: &PackageName, policy: NamespaceOverlapPolicy) {
+        let current = self.namespace_policies.entry(name.clone()).or_default();
+        // Most permissive wins: Rewrite > IdenticalOnly > Forbidden
+        let new_permissiveness = match policy {
+            NamespaceOverlapPolicy::Rewrite => 2,
+            NamespaceOverlapPolicy::IdenticalOnly => 1,
+            NamespaceOverlapPolicy::Forbidden => 0,
+        };
+        let current_permissiveness = match *current {
+            NamespaceOverlapPolicy::Rewrite => 2,
+            NamespaceOverlapPolicy::IdenticalOnly => 1,
+            NamespaceOverlapPolicy::Forbidden => 0,
+        };
+        if new_permissiveness > current_permissiveness {
+            *current = policy;
+        }
+    }
+
+    /// Returns true if the package needs namespace rewriting due to multi-version resolution.
+    ///
+    /// A package needs rewriting if:
+    /// 1. Multiple versions of this package name exist in the graph, AND
+    /// 2. The namespace_overlap policy is `Rewrite` (default)
+    pub fn needs_namespace_rewrite(&self, id: &ResolvedPackageId) -> bool {
+        // Check if multiple versions exist
+        let versions_count = self
+            .entries
+            .keys()
+            .filter(|k| k.name() == id.name())
+            .count();
+
+        if versions_count <= 1 {
+            return false;
+        }
+
+        // Check the namespace policy
+        let policy = self.namespace_policy(id.name());
+        matches!(policy, NamespaceOverlapPolicy::Rewrite)
+    }
+
+    /// Returns a list of vendor module directory names used by this graph.
+    pub fn vendor_module_names(&self) -> Vec<String> {
+        let mut modules: Vec<String> = self
+            .entries
+            .keys()
+            .map(|id| id.vendor_dir_name(self))
+            .collect();
+
+        modules.sort();
+        modules.dedup();
+        modules
+    }
+
+    /// Returns all resolved ids for the given package name.
+    pub fn ids_for_name(&self, name: &PackageName) -> Vec<ResolvedPackageId> {
+        self.entries
+            .keys()
+            .filter(|id| id.name() == name)
+            .cloned()
+            .collect()
+    }
+
+    /// Returns the only resolved dependency for a package name.
+    ///
+    /// This is useful for legacy call sites that assume single-version resolution.
+    pub fn get_single_by_name(&self, name: &PackageName) -> Option<&ResolvedDependency> {
+        let mut matches = self.entries.iter().filter(|(id, _)| id.name() == name);
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(first.1)
     }
 }
 
 impl IntoIterator for DependencyGraph {
     type Item = ResolvedDependency;
-    type IntoIter = std::collections::hash_map::IntoValues<PackageName, ResolvedDependency>;
+    type IntoIter = std::collections::hash_map::IntoValues<ResolvedPackageId, ResolvedDependency>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.entries.into_values()
@@ -183,6 +368,25 @@ impl<'a> DependencyGraphBuilder<'a> {
             cache,
             config,
             policy,
+            client: None,
+        }
+    }
+
+    /// Sets a shared HTTP client for connection pooling.
+    ///
+    /// When set, all Artifactory registry operations will reuse this client's
+    /// connection pool instead of creating new connections for each request.
+    pub fn with_client(mut self, client: reqwest::Client) -> Self {
+        self.client = Some(client);
+        self
+    }
+
+    /// Creates an Artifactory client, reusing the shared HTTP client if available.
+    fn create_artifactory(&self, registry: RegistryUri) -> miette::Result<Artifactory> {
+        if let Some(ref client) = self.client {
+            Artifactory::new_with_client(registry, self.credentials, client.clone())
+        } else {
+            Artifactory::new(registry, self.credentials, self.policy)
         }
     }
 
@@ -198,18 +402,24 @@ impl<'a> DependencyGraphBuilder<'a> {
         let parent_dir = env::current_dir().into_diagnostic()?;
 
         // Prepare the dependency graph
-        let mut deps = DependencyGraph::default();
+        let mut deps = DependencyGraph::new(self.config.allow_multiple_versions());
+
+        let mut roots = Vec::new();
 
         for dependency in &self.manifest.dependencies {
-            self.process_dependency(
-                name.clone(),
-                dependency.clone(),
-                true, // is_root
-                &parent_dir,
-                &mut deps,
-            )
-            .await?;
+            let id = self
+                .process_dependency(
+                    name.clone(),
+                    dependency.clone(),
+                    true, // is_root
+                    &parent_dir,
+                    &mut deps,
+                )
+                .await?;
+            roots.push(id);
         }
+
+        deps.roots = roots;
 
         Ok(deps)
     }
@@ -221,8 +431,14 @@ impl<'a> DependencyGraphBuilder<'a> {
         is_root: bool,
         parent_dir: &Path,
         deps: &mut DependencyGraph,
-    ) -> miette::Result<()> {
-        match dependency.manifest {
+    ) -> miette::Result<ResolvedPackageId> {
+        // Track per-dependency resolver permissions
+        if dependency.allows_multiversion() {
+            deps.permit_multiversion(&dependency.package);
+        }
+        deps.update_namespace_policy(&dependency.package, dependency.namespace_overlap_policy());
+
+        let id = match dependency.manifest {
             DependencyManifest::Remote(manifest) => {
                 self.process_remote_dependency(
                     name.clone(),
@@ -234,7 +450,7 @@ impl<'a> DependencyGraphBuilder<'a> {
                     parent_dir,
                     deps,
                 )
-                .await?;
+                .await?
             }
             DependencyManifest::Local(manifest) => {
                 self.process_local_dependency(
@@ -247,11 +463,11 @@ impl<'a> DependencyGraphBuilder<'a> {
                     parent_dir,
                     deps,
                 )
-                .await?;
+                .await?
             }
-        }
+        };
 
-        Ok(())
+        Ok(id)
     }
 
     #[async_recursion]
@@ -262,7 +478,7 @@ impl<'a> DependencyGraphBuilder<'a> {
         is_root: bool,
         parent_dir: &Path,
         deps: &mut DependencyGraph,
-    ) -> miette::Result<()> {
+    ) -> miette::Result<ResolvedPackageId> {
         // If the dependency.manifest_path is relative, it's relative to the parent manifest.
         // We therefore need to resolve it to an absolute path.
         let abs_manifest_dir = if dependency.manifest.path.is_relative() {
@@ -298,46 +514,44 @@ impl<'a> DependencyGraphBuilder<'a> {
                 })?;
 
         // Process sub-dependencies first
-        for sub_dependency in &manifest.dependencies {
-            self.process_dependency(
-                dependency.package.clone(),
-                sub_dependency.clone(),
-                true, // is_root
-                &abs_manifest_dir,
-                deps,
-            )
-            .await?;
-        }
-
         let package = if is_root {
             let store = PackageStore::open(&abs_manifest_dir).await?;
             let package = store.release(&manifest, self.config, Some(deps)).await?;
 
             // Ensure that the package version doesn't clash with an existing entry,
             // and that it matches the version requirement in the manifest
-            if let Some(version_req) = dependency.manifest.publish.map(|p| p.version) {
+            if let Some(version_req) = dependency
+                .manifest
+                .publish
+                .as_ref()
+                .map(|p| p.version.clone())
+            {
                 let found_version = package.version();
 
-                if let Some(entry) = deps.get_mut(package.name()) {
-                    let existing_package = entry.package();
-                    ensure!(
-                        version_req.matches(existing_package.version()),
-                        "a dependency of your project requires {}@{} which collides with {}@{} required by {:?}",
-                        package.name(),
-                        found_version,
-                        existing_package.name(),
-                        existing_package.version(),
-                        name,
-                    );
-                } else {
-                    // Package not yet in the dependency graph, so we verify the version requirement
-                    ensure!(
-                        version_req.matches(found_version),
-                        "a dependency of your project requires {}@{} but the resolved version is {}",
-                        package.name(),
-                        version_req,
-                        found_version,
-                    );
+                // Always verify the version requirement against the built package.
+                ensure!(
+                    version_req.matches(found_version),
+                    "a dependency of your project requires {}@{} but the resolved version is {}",
+                    package.name(),
+                    version_req,
+                    found_version,
+                );
+
+                // In single-version mode, also ensure no clash with already-resolved entry.
+                // Use per-dependency permission if granted, otherwise fall back to global config.
+                if !deps.is_multiversion_permitted(package.name()) {
+                    if let Some(entry) = deps.get_single_by_name(package.name()) {
+                        let existing_package = entry.package();
+                        ensure!(
+                            version_req.matches(existing_package.version()),
+                            "a dependency of your project requires {}@{} which collides with {}@{} required by {:?}",
+                            package.name(),
+                            found_version,
+                            existing_package.name(),
+                            existing_package.version(),
+                            name,
+                        );
+                    }
                 }
             }
 
@@ -345,51 +559,94 @@ impl<'a> DependencyGraphBuilder<'a> {
         } else {
             // Non-root packages may not be physically present on disk.
             // Take it from the collected entries instead.
-            deps.get(&dependency.package)
-                .ok_or_else(|| {
-                    miette::miette!(
-                        "no resolved package found for local dependency {}",
-                        dependency.package
-                    )
-                })?
-                .package()
-                .clone()
+            let mut matches = deps
+                .entries
+                .iter()
+                .filter(|(id, _)| id.name() == &dependency.package);
+            let first = matches.next().ok_or_else(|| {
+                miette::miette!(
+                    "no resolved package found for local dependency {}",
+                    dependency.package
+                )
+            })?;
+            ensure!(
+                matches.next().is_none(),
+                "local dependency {} is ambiguous: multiple resolved versions exist",
+                dependency.package
+            );
+            first.1.package().clone()
         };
 
-        let dependency_name = package.name().clone();
-        let sub_dependencies = package.manifest.dependencies.clone();
-        let sub_dependency_names: Vec<_> = sub_dependencies
-            .iter()
-            .map(|sub_dependency| sub_dependency.package.clone())
-            .collect();
+        let dependency_id =
+            ResolvedPackageId::new(package.name().clone(), package.version().clone());
+
+        // Check if this local dependency is already resolved (same name+version)
+        // Extract multiversion settings from the local dependency's publish section
+        let allows_multiversion = dependency
+            .manifest
+            .publish
+            .as_ref()
+            .map(|p| matches!(p.resolver, ResolverMode::MultiVersion))
+            .unwrap_or(false);
+        let namespace_overlap_policy = dependency
+            .manifest
+            .publish
+            .as_ref()
+            .map(|p| p.namespace_overlap)
+            .unwrap_or_default();
+
+        if let Some(existing) = deps.get_mut(&dependency_id) {
+            match existing {
+                ResolvedDependency::Local { dependants, .. } => {
+                    dependants.push(Dependant {
+                        name,
+                        version_req: VersionReq::STAR,
+                        allows_multiversion,
+                        namespace_overlap_policy,
+                    });
+                    return Ok(dependency_id);
+                }
+                ResolvedDependency::Remote { .. } => {
+                    bail!(
+                        "a dependency of your project requires local {} but it collides with an already resolved remote dependency",
+                        dependency_id
+                    );
+                }
+            }
+        }
+
+        // Process the sub-dependencies of the local package and record the resolved ids
+        let mut sub_dependency_ids = Vec::new();
+        for sub_dependency in package.manifest.dependencies.clone() {
+            let sub_id = self
+                .process_dependency(
+                    package.name().clone(),
+                    sub_dependency,
+                    false,
+                    &abs_manifest_dir,
+                    deps,
+                )
+                .await?;
+            sub_dependency_ids.push(sub_id);
+        }
 
         // Add the local package to the dependency graph
         deps.insert(
-            dependency_name.clone(),
+            dependency_id.clone(),
             ResolvedDependency::Local {
                 package,
                 path: abs_manifest_dir.clone(),
                 dependants: vec![Dependant {
                     name,
                     version_req: VersionReq::STAR,
+                    allows_multiversion,
+                    namespace_overlap_policy,
                 }],
-                depends_on: sub_dependency_names,
+                depends_on: sub_dependency_ids,
             },
         );
 
-        // Process the sub-dependencies of the local package
-        for sub_dependency in sub_dependencies {
-            self.process_dependency(
-                dependency_name.clone(),
-                sub_dependency,
-                false,
-                &abs_manifest_dir,
-                deps,
-            )
-            .await?;
-        }
-
-        Ok(())
+        Ok(dependency_id)
     }
 
     #[async_recursion]
@@ -400,17 +657,21 @@ impl<'a> DependencyGraphBuilder<'a> {
         is_root: bool,
         parent_dir: &Path,
         deps: &mut DependencyGraph,
-    ) -> miette::Result<()> {
+    ) -> miette::Result<ResolvedPackageId> {
         let version_req = dependency.manifest.version.clone();
 
-        // Check if the dependency is already resolved
-        if let Some(entry) = deps.get_mut(&dependency.package) {
-            match entry {
+        // Check if the dependency is already resolved with a compatible version
+        if let Some((existing_id, existing_entry)) = deps
+            .entries
+            .iter_mut()
+            .find(|(id, _)| id.name() == &dependency.package && version_req.matches(id.version()))
+        {
+            match existing_entry {
                 ResolvedDependency::Local {
                     path, dependants, ..
                 } => {
                     bail!(
-                        "a dependency of your project requires {}@{} which collides with a local dependency for {}@{} required by {:?}", 
+                        "a dependency of your project requires {}@{} which collides with a local dependency for {}@{} required by {:?}",
                         dependency.package,
                         dependency.manifest.version,
                         dependency.package,
@@ -418,59 +679,97 @@ impl<'a> DependencyGraphBuilder<'a> {
                         dependants[0].name.clone(),
                     );
                 }
-                ResolvedDependency::Remote {
-                    package,
-                    dependants,
-                    ..
-                } => {
-                    ensure!(
-                        version_req.matches(package.version()),
-                        "a dependency of your project requires {}@{} which collides with {}@{} required by {:?}",
-                        dependency.package,
-                        dependency.manifest.version,
-                        package.name(),
-                        package.version(),
-                        dependants[0].name.clone(),
-                    );
-
-                    dependants.push(Dependant { name, version_req });
+                ResolvedDependency::Remote { dependants, .. } => {
+                    dependants.push(Dependant {
+                        name,
+                        version_req,
+                        allows_multiversion: matches!(
+                            dependency.manifest.resolver,
+                            ResolverMode::MultiVersion
+                        ),
+                        namespace_overlap_policy: dependency.manifest.namespace_overlap,
+                    });
+                    return Ok(existing_id.clone());
                 }
             }
-        } else {
-            // Resolve the dependency
-            let dependency_pkg = self.resolve(dependency.clone(), is_root).await?;
+        }
 
-            let dependency_name = dependency_pkg.name().clone();
-            let sub_dependencies = dependency_pkg.manifest.dependencies.clone();
-            let sub_dependency_names: Vec<_> = sub_dependencies
+        // If multi-version is disabled for this package, detect name collisions and fail early.
+        // Use per-dependency permission if granted, otherwise fall back to global config.
+        if !deps.is_multiversion_permitted(&dependency.package) {
+            if let Some((existing_id, existing_entry)) = deps
+                .entries
                 .iter()
-                .map(|sub_dependency| sub_dependency.package.clone())
-                .collect();
+                .find(|(id, _)| id.name() == &dependency.package)
+            {
+                match existing_entry {
+                    ResolvedDependency::Remote { package, .. } => {
+                        ensure!(
+                            version_req.matches(package.version()),
+                            "a dependency of your project requires {}@{} which collides with {}@{} required by {:?}",
+                            dependency.package,
+                            dependency.manifest.version,
+                            package.name(),
+                            package.version(),
+                            existing_entry.dependants()[0].name.clone(),
+                        );
+                    }
+                    ResolvedDependency::Local { path, .. } => {
+                        bail!(
+                            "a dependency of your project requires {}@{} which collides with a local dependency at {}",
+                            dependency.package,
+                            dependency.manifest.version,
+                            path.display(),
+                        );
+                    }
+                }
+                return Ok(existing_id.clone());
+            }
+        }
 
-            deps.insert(
-                dependency_name.clone(),
-                ResolvedDependency::Remote {
-                    package: dependency_pkg,
-                    registry: dependency.manifest.registry,
-                    repository: dependency.manifest.repository,
-                    dependants: vec![Dependant { name, version_req }],
-                    depends_on: sub_dependency_names,
-                },
-            );
+        // Resolve the dependency
+        let dependency_pkg = self.resolve(dependency.clone(), is_root).await?;
 
-            for sub_dependency in sub_dependencies {
-                self.process_dependency(
-                    dependency_name.clone(),
+        let dependency_id = ResolvedPackageId::new(
+            dependency_pkg.name().clone(),
+            dependency_pkg.version().clone(),
+        );
+
+        // Process sub-dependencies first and record resolved ids
+        let mut sub_dependency_ids = Vec::new();
+        for sub_dependency in dependency_pkg.manifest.dependencies.clone() {
+            let sub_id = self
+                .process_dependency(
+                    dependency_pkg.name().clone(),
                     sub_dependency,
                     false,
                     parent_dir,
                     deps,
                 )
                 .await?;
-            }
+            sub_dependency_ids.push(sub_id);
         }
 
-        Ok(())
+        deps.insert(
+            dependency_id.clone(),
+            ResolvedDependency::Remote {
+                package: dependency_pkg,
+                registry: dependency.manifest.registry,
+                repository: dependency.manifest.repository,
+                dependants: vec![Dependant {
+                    name,
+                    version_req,
+                    allows_multiversion: matches!(
+                        dependency.manifest.resolver,
+                        ResolverMode::MultiVersion
+                    ),
+                    namespace_overlap_policy: dependency.manifest.namespace_overlap,
+                }],
+                depends_on: sub_dependency_ids,
+            },
+        );
+
+        Ok(dependency_id)
     }
 
     async fn resolve(
@@ -478,7 +777,12 @@ impl<'a> DependencyGraphBuilder<'a> {
         dependency: RemoteDependency,
         is_root: bool,
     ) -> miette::Result<Package> {
-        if let Some(local_locked) = self.lockfile.get(&dependency.package) {
+        if let Some(local_locked) = self.lockfile.find(
+            &dependency.package,
+            &dependency.manifest.version,
+            Some(&dependency.manifest.registry),
+            Some(&dependency.manifest.repository),
+        ) {
             ensure!(
                 is_root || dependency.manifest.registry == local_locked.registry,
                 "mismatched registry detected for dependency {} - requested {} but lockfile requires {}",
@@ -497,15 +801,12 @@ impl<'a> DependencyGraphBuilder<'a> {
                 }
             }
 
-            let registry = Artifactory::new(
-                dependency.manifest.registry.clone().try_into()?,
-                self.credentials,
-                self.policy,
-            )
-            .wrap_err(DownloadError {
-                name: dependency.package.clone(),
-                version: dependency.manifest.version.clone(),
-            })?;
+            let registry = self
+                .create_artifactory(dependency.manifest.registry.clone().try_into()?)
+                .wrap_err(DownloadError {
+                    name: dependency.package.clone(),
+                    version: dependency.manifest.version.clone(),
+                })?;
 
             let package = registry
                 // TODO(#205): This works now because buffrs only supports pinned versions.
@@ -527,15 +828,12 @@ impl<'a> DependencyGraphBuilder<'a> {
         } else {
             // Package not present in lockfile (and thus not in cache)
             // => download it from the registry
-            let registry = Artifactory::new(
-                dependency.manifest.registry.clone().try_into()?,
-                self.credentials,
-                self.policy,
-            )
-            .wrap_err(DownloadError {
-                name: dependency.package.clone(),
-                version: dependency.manifest.version.clone(),
-            })?;
+            let registry = self
+                .create_artifactory(dependency.manifest.registry.clone().try_into()?)
+                .wrap_err(DownloadError {
+                    name: dependency.package.clone(),
+                    version: dependency.manifest.version.clone(),
+                })?;
 
             let package = registry
                 .download(dependency.clone().into())

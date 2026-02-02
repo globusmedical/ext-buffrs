@@ -35,18 +35,19 @@ use crate::{
 pub const MANIFEST_FILE: &str = "Proto.toml";
 
 /// The canary edition supported by this version of buffrs
-pub const CANARY_EDITION: &str = concat!("0.", env!("CARGO_PKG_VERSION_MINOR"));
+/// Note: This is independent of the crate version - only bump when the Proto.toml format changes
+pub const CANARY_EDITION: &str = "0.50";
 
 /// Edition of the buffrs manifest
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(into = "&str", from = "&str")]
 pub enum Edition {
-    /// The canary edition of manifests
+    /// The canary edition of manifests (0.50)
     ///
-    /// This indicates that breaking changes and unstable behavior can occur
-    /// at any time. Users are responsible for consulting documentation and
-    /// help channels if errors occur.
+    /// This edition introduces multi-version dependency support.
     Canary,
+    /// The canary edition used by buffrs 0.10.x
+    Canary10,
     /// The canary edition used by buffrs 0.9.x
     Canary09,
     /// The canary edition used by buffrs 0.8.x
@@ -70,7 +71,9 @@ impl Edition {
 impl From<&str> for Edition {
     fn from(value: &str) -> Self {
         match value {
+            // CANARY_EDITION is "0.50" - the current proto.toml format version with multi-version support
             self::CANARY_EDITION => Self::Canary,
+            "0.10" => Self::Canary10,
             "0.9" => Self::Canary09,
             "0.8" => Self::Canary08,
             "0.7" => Self::Canary07,
@@ -83,6 +86,7 @@ impl From<Edition> for &'static str {
     fn from(value: Edition) -> Self {
         match value {
             Edition::Canary => CANARY_EDITION,
+            Edition::Canary10 => "0.10",
             Edition::Canary09 => "0.9",
             Edition::Canary08 => "0.8",
             Edition::Canary07 => "0.7",
@@ -217,7 +221,7 @@ mod deserializer {
                     };
 
                     match Edition::from(edition.as_str()) {
-                        Edition::Canary | Edition::Canary09 | Edition::Canary08 | Edition::Canary07 => Ok(RawManifest::Canary {
+                        Edition::Canary | Edition::Canary10 | Edition::Canary09 | Edition::Canary08 | Edition::Canary07 => Ok(RawManifest::Canary {
                             package,
                             dependencies,
                         }),
@@ -242,12 +246,14 @@ impl From<Manifest> for RawManifest {
             .collect();
 
         match manifest.edition {
-            Edition::Canary | Edition::Canary09 | Edition::Canary08 | Edition::Canary07 => {
-                RawManifest::Canary {
-                    package: manifest.package,
-                    dependencies,
-                }
-            }
+            Edition::Canary
+            | Edition::Canary10
+            | Edition::Canary09
+            | Edition::Canary08
+            | Edition::Canary07 => RawManifest::Canary {
+                package: manifest.package,
+                dependencies,
+            },
             Edition::Unknown => RawManifest::Unknown {
                 package: manifest.package,
                 dependencies,
@@ -320,38 +326,60 @@ impl Manifest {
         let dependencies = raw
             .dependencies()
             .iter()
-            .map(|(package, manifest)| {
-                let package = package.clone();
-                let manifest = match manifest {
+            .map(|(toml_key, manifest)| {
+                let (package, resolved_manifest) = match manifest {
                     DependencyManifest::Remote(remote_manifest) => {
+                        // Use explicit package name if provided, otherwise use the TOML key
+                        let package = remote_manifest
+                            .package
+                            .clone()
+                            .unwrap_or_else(|| toml_key.clone());
                         // For remote manifest dependencies, resolve the registry alias
-                        DependencyManifest::Remote(RemoteDependencyManifest {
-                            version: remote_manifest.version.clone(),
-                            repository: remote_manifest.repository.clone(),
-                            registry: remote_manifest.registry.with_alias_resolved(config)?,
-                        })
+                        let resolved_manifest =
+                            DependencyManifest::Remote(RemoteDependencyManifest {
+                                package: remote_manifest.package.clone(),
+                                version: remote_manifest.version.clone(),
+                                repository: remote_manifest.repository.clone(),
+                                registry: remote_manifest.registry.with_alias_resolved(config)?,
+                                resolver: remote_manifest.resolver,
+                                namespace_overlap: remote_manifest.namespace_overlap,
+                            });
+                        (package, resolved_manifest)
                     }
                     DependencyManifest::Local(local_manifest) => {
                         // For local dependencies, check if a remote manifest is present
                         // and resolve its registry alias
+                        let package = local_manifest
+                            .publish
+                            .as_ref()
+                            .and_then(|p| p.package.clone())
+                            .unwrap_or_else(|| toml_key.clone());
                         if let Some(ref remote_manifest) = local_manifest.publish {
-                            DependencyManifest::Local(LocalDependencyManifest {
-                                path: local_manifest.path.clone(),
-                                publish: Some(RemoteDependencyManifest {
-                                    version: remote_manifest.version.clone(),
-                                    repository: remote_manifest.repository.clone(),
-                                    registry: remote_manifest
-                                        .registry
-                                        .with_alias_resolved(config)?,
-                                }),
-                            })
+                            let resolved_manifest =
+                                DependencyManifest::Local(LocalDependencyManifest {
+                                    path: local_manifest.path.clone(),
+                                    publish: Some(RemoteDependencyManifest {
+                                        package: remote_manifest.package.clone(),
+                                        version: remote_manifest.version.clone(),
+                                        repository: remote_manifest.repository.clone(),
+                                        registry: remote_manifest
+                                            .registry
+                                            .with_alias_resolved(config)?,
+                                        resolver: remote_manifest.resolver,
+                                        namespace_overlap: remote_manifest.namespace_overlap,
+                                    }),
+                                });
+                            (package, resolved_manifest)
                         } else {
-                            manifest.clone()
+                            (package, manifest.clone())
                         }
                     }
                 };
 
-                Ok(Dependency { package, manifest })
+                Ok(Dependency {
+                    package,
+                    manifest: resolved_manifest,
+                })
             })
             .collect::<miette::Result<Vec<_>>>()?;
 
@@ -560,11 +588,16 @@ impl Dependency {
         version: VersionReq,
     ) -> Self {
         Self {
-            package,
+            package: package.clone(),
             manifest: RemoteDependencyManifest {
+                // When creating via Dependency::new, the manifest package field is None
+                // because the dependency key equals the package name
+                package: None,
                 repository,
                 version,
                 registry: registry.to_owned(),
+                resolver: ResolverMode::default(),
+                namespace_overlap: NamespaceOverlapPolicy::default(),
             }
             .into(),
         }
@@ -587,6 +620,33 @@ impl Dependency {
         }
 
         dependency
+    }
+
+    /// Returns the resolver mode for this dependency edge.
+    pub fn resolver_mode(&self) -> ResolverMode {
+        match &self.manifest {
+            DependencyManifest::Remote(m) => m.resolver,
+            DependencyManifest::Local(m) => {
+                m.publish.as_ref().map(|p| p.resolver).unwrap_or_default()
+            }
+        }
+    }
+
+    /// Returns the namespace overlap policy for this dependency edge.
+    pub fn namespace_overlap_policy(&self) -> NamespaceOverlapPolicy {
+        match &self.manifest {
+            DependencyManifest::Remote(m) => m.namespace_overlap,
+            DependencyManifest::Local(m) => m
+                .publish
+                .as_ref()
+                .map(|p| p.namespace_overlap)
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Returns true if this dependency allows multiple versions.
+    pub fn allows_multiversion(&self) -> bool {
+        matches!(self.resolver_mode(), ResolverMode::MultiVersion)
     }
 }
 
@@ -621,15 +681,62 @@ impl DependencyManifest {
     }
 }
 
+/// Resolver mode for a dependency edge.
+///
+/// Controls whether multiple versions of the same package name can coexist.
+#[derive(Debug, Clone, Copy, Hash, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ResolverMode {
+    /// Default: single-version resolution (one version per package name)
+    #[default]
+    Default,
+    /// Allow multiple versions of this package if constraints require it
+    #[serde(rename = "multiversion")]
+    MultiVersion,
+}
+
+/// Namespace overlap policy for multi-version scenarios.
+///
+/// Controls what happens when multiple versions declare the same protobuf namespace.
+#[derive(Debug, Clone, Copy, Hash, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NamespaceOverlapPolicy {
+    /// Default: rewrite proto package declarations to include version suffix
+    /// This ensures safe multi-version coexistence by generating unique namespaces.
+    #[default]
+    Rewrite,
+    /// Allow overlap only if proto file content hashes match (no rewriting needed)
+    IdenticalOnly,
+    /// Fail if two versions declare the same namespace (legacy behavior)
+    Forbidden,
+}
+
 /// Manifest format for dependencies
 #[derive(Debug, Clone, Hash, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoteDependencyManifest {
+    /// Optional explicit package name (when TOML key differs from actual package name)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<PackageName>,
     /// Version requirement in the buffrs format, currently only supports pinning
     pub version: VersionReq,
     /// Artifactory repository to pull dependency from
     pub repository: String,
     /// Artifactory registry to pull from
     pub registry: RegistryRef,
+    /// Resolver mode for this dependency edge (default: single-version)
+    #[serde(default, skip_serializing_if = "is_default_resolver")]
+    pub resolver: ResolverMode,
+    /// Namespace overlap policy when multi-version is enabled
+    #[serde(default, skip_serializing_if = "is_default_namespace_policy")]
+    pub namespace_overlap: NamespaceOverlapPolicy,
+}
+
+fn is_default_resolver(mode: &ResolverMode) -> bool {
+    matches!(mode, ResolverMode::Default)
+}
+
+fn is_default_namespace_policy(policy: &NamespaceOverlapPolicy) -> bool {
+    matches!(policy, NamespaceOverlapPolicy::Rewrite)
 }
 
 impl From<RemoteDependencyManifest> for DependencyManifest {
@@ -667,9 +774,14 @@ mod dependency_manifest_deserializer {
             #[derive(Deserialize)]
             struct TempManifest {
                 path: Option<PathBuf>,
+                package: Option<PackageName>,
                 version: Option<VersionReq>,
                 repository: Option<String>,
                 registry: Option<RegistryRef>,
+                #[serde(default)]
+                resolver: ResolverMode,
+                #[serde(default)]
+                namespace_overlap: NamespaceOverlapPolicy,
             }
 
             let temp: TempManifest = TempManifest::deserialize(deserializer)?;
@@ -681,9 +793,12 @@ mod dependency_manifest_deserializer {
                     publish: match (temp.version, temp.repository, temp.registry) {
                         (Some(version), Some(repository), Some(registry)) => {
                             Some(RemoteDependencyManifest {
+                                package: temp.package.clone(),
                                 version,
                                 repository,
                                 registry,
+                                resolver: temp.resolver,
+                                namespace_overlap: temp.namespace_overlap,
                             })
                         }
                         _ => None,
@@ -694,13 +809,63 @@ mod dependency_manifest_deserializer {
             {
                 // Deserialize as a remote dependency
                 Ok(DependencyManifest::Remote(RemoteDependencyManifest {
+                    package: temp.package,
                     version,
                     repository,
                     registry,
+                    resolver: temp.resolver,
+                    namespace_overlap: temp.namespace_overlap,
                 }))
             } else {
                 Err(D::Error::custom("Invalid dependency manifest"))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test: Proto.toml without [dependencies] should parse as empty dependencies.
+    /// See issue #23.
+    #[test]
+    fn manifest_without_dependencies_parses_as_empty() {
+        let toml = r#"
+edition = "0.50"
+
+[package]
+name = "test-package"
+version = "1.0.0"
+type = "lib"
+"#;
+        let manifest = Manifest::try_parse(toml, None).expect("should parse successfully");
+        assert!(
+            manifest.dependencies.is_empty(),
+            "expected zero dependencies, got {:?}",
+            manifest.dependencies
+        );
+        assert!(manifest.package.is_some());
+        assert_eq!(
+            manifest.package.as_ref().unwrap().name.to_string(),
+            "test-package"
+        );
+    }
+
+    /// Verify that an empty dependencies table also works.
+    #[test]
+    fn manifest_with_empty_dependencies_table() {
+        let toml = r#"
+edition = "0.50"
+
+[package]
+name = "another-package"
+version = "2.0.0"
+type = "api"
+
+[dependencies]
+"#;
+        let manifest = Manifest::try_parse(toml, None).expect("should parse successfully");
+        assert!(manifest.dependencies.is_empty());
     }
 }
