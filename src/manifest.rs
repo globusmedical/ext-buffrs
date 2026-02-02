@@ -349,14 +349,21 @@ impl Manifest {
                     DependencyManifest::Local(local_manifest) => {
                         // For local dependencies, check if a remote manifest is present
                         // and resolve its registry alias
+                        // Use explicit package name if provided, otherwise use the TOML key
                         let package = local_manifest
-                            .publish
-                            .as_ref()
-                            .and_then(|p| p.package.clone())
+                            .package
+                            .clone()
+                            .or_else(|| {
+                                local_manifest
+                                    .publish
+                                    .as_ref()
+                                    .and_then(|p| p.package.clone())
+                            })
                             .unwrap_or_else(|| toml_key.clone());
                         if let Some(ref remote_manifest) = local_manifest.publish {
                             let resolved_manifest =
                                 DependencyManifest::Local(LocalDependencyManifest {
+                                    package: local_manifest.package.clone(),
                                     path: local_manifest.path.clone(),
                                     publish: Some(RemoteDependencyManifest {
                                         package: remote_manifest.package.clone(),
@@ -590,8 +597,7 @@ impl Dependency {
         Self {
             package: package.clone(),
             manifest: RemoteDependencyManifest {
-                // When creating via Dependency::new, the manifest package field is None
-                // because the dependency key equals the package name
+                // No aliasing - key name matches package name
                 package: None,
                 repository,
                 version,
@@ -714,7 +720,7 @@ pub enum NamespaceOverlapPolicy {
 /// Manifest format for dependencies
 #[derive(Debug, Clone, Hash, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoteDependencyManifest {
-    /// Optional explicit package name (when TOML key differs from actual package name)
+    /// Actual package name (if different from TOML key name, for aliasing)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package: Option<PackageName>,
     /// Version requirement in the buffrs format, currently only supports pinning
@@ -748,6 +754,9 @@ impl From<RemoteDependencyManifest> for DependencyManifest {
 /// Manifest format for local filesystem dependencies
 #[derive(Debug, Clone, Hash, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LocalDependencyManifest {
+    /// Actual package name (if different from TOML key name, for aliasing)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<PackageName>,
     /// Path to local buffrs package
     pub path: PathBuf,
     /// Optional remote manifest for publishing
@@ -773,8 +782,9 @@ mod dependency_manifest_deserializer {
         {
             #[derive(Deserialize)]
             struct TempManifest {
-                path: Option<PathBuf>,
+                /// Actual package name (for aliasing: key is alias, this is real name)
                 package: Option<PackageName>,
+                path: Option<PathBuf>,
                 version: Option<VersionReq>,
                 repository: Option<String>,
                 registry: Option<RegistryRef>,
@@ -789,6 +799,7 @@ mod dependency_manifest_deserializer {
             if let Some(path) = temp.path {
                 // Deserialize as a local dependency with optional remote attributes
                 Ok(DependencyManifest::Local(LocalDependencyManifest {
+                    package: temp.package.clone(),
                     path,
                     publish: match (temp.version, temp.repository, temp.registry) {
                         (Some(version), Some(repository), Some(registry)) => {

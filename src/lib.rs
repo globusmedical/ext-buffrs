@@ -41,6 +41,8 @@ pub mod metadata;
 pub mod namespace_scan;
 /// Packages formats and utilities
 pub mod package;
+/// SAT-based dependency resolution using PubGrub algorithm.
+pub mod pubgrub_resolver;
 /// Supported registries
 pub mod registry;
 /// Resolve package dependencies.
@@ -48,6 +50,8 @@ pub mod resolver;
 /// Validation for buffrs packages.
 #[cfg(feature = "validation")]
 pub mod validation;
+/// Version selection and manipulation utilities.
+pub mod version;
 
 /// Managed directory for `buffrs`
 pub const BUFFRS_HOME: &str = ".buffrs";

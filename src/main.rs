@@ -185,6 +185,11 @@ enum LockfileCommand {
 async fn main() -> miette::Result<()> {
     human_panic::setup_panic!();
 
+    // Set up tracing with an env filter that suppresses noisy dependency crates.
+    // BUFFRS_LOG can be set to override: e.g., "debug" or "buffrs=debug,pubgrub=info"
+    let filter = tracing_subscriber::EnvFilter::try_from_env("BUFFRS_LOG")
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,buffrs=info"));
+
     tracing_subscriber::fmt()
         .compact()
         .without_time()
@@ -192,6 +197,7 @@ async fn main() -> miette::Result<()> {
         .with_file(false)
         .with_target(false)
         .with_line_number(false)
+        .with_env_filter(filter)
         .try_init()
         .unwrap();
 

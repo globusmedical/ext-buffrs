@@ -17,13 +17,13 @@ buffrs publish --registry https://artifactory.company.com/artifactory --reposito
 
 ### Options
 
-| Option              | Description                              |
-| ------------------- | ---------------------------------------- |
-| `--registry`        | Artifactory URL                          |
-| `--repository`      | Destination repository name              |
-| `--allow-dirty`     | Allow publishing with uncommitted changes |
-| `--dry-run`         | Package without uploading                |
-| `--set-version`     | Override manifest version                |
+| Option          | Description                               |
+| --------------- | ----------------------------------------- |
+| `--registry`    | Artifactory URL                           |
+| `--repository`  | Destination repository name               |
+| `--allow-dirty` | Allow publishing with uncommitted changes |
+| `--dry-run`     | Package without uploading                 |
+| `--set-version` | Override manifest version                 |
 
 ## Package Preparation
 
