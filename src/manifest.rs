@@ -35,17 +35,16 @@ use crate::{
 pub const MANIFEST_FILE: &str = "Proto.toml";
 
 /// The canary edition supported by this version of buffrs
-pub const CANARY_EDITION: &str = concat!("0.", env!("CARGO_PKG_VERSION_MINOR"));
+/// Note: This is independent of the crate version - only bump when the Proto.toml format changes
+pub const CANARY_EDITION: &str = "0.50";
 
 /// Edition of the buffrs manifest
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(into = "&str", from = "&str")]
 pub enum Edition {
-    /// The canary edition of manifests
+    /// The canary edition of manifests (0.50)
     ///
-    /// This indicates that breaking changes and unstable behavior can occur
-    /// at any time. Users are responsible for consulting documentation and
-    /// help channels if errors occur.
+    /// This edition introduces multi-version dependency support.
     Canary,
     /// The canary edition used by buffrs 0.10.x
     Canary10,
@@ -72,6 +71,7 @@ impl Edition {
 impl From<&str> for Edition {
     fn from(value: &str) -> Self {
         match value {
+            // CANARY_EDITION is "0.50" - the current proto.toml format version with multi-version support
             self::CANARY_EDITION => Self::Canary,
             "0.10" => Self::Canary10,
             "0.9" => Self::Canary09,

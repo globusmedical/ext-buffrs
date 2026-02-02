@@ -1,6 +1,6 @@
 # Multi-Version Dependencies
 
-Starting with buffrs 0.50.0, you can opt-in to allow multiple versions of the same package to coexist in your dependency graph. This is useful in monorepo environments where different parts of your codebase may require different versions of the same protobuf package.
+Starting with buffrs 1.0.0, you can opt-in to allow multiple versions of the same package to coexist in your dependency graph. This is useful in monorepo environments where different parts of your codebase may require different versions of the same protobuf package.
 
 ## The Problem
 

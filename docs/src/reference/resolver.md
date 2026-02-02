@@ -22,7 +22,7 @@ Error: a dependency of your project requires lib-algo-base@=0.1.3 which collides
 
 ## Multi-Version Resolution
 
-Starting with buffrs 0.50.0, you can opt-in to allow multiple versions per dependency by adding `resolver = "multiversion"` to the dependency declaration:
+Starting with buffrs 1.0.0, you can opt-in to allow multiple versions per dependency by adding `resolver = "multiversion"` to the dependency declaration:
 
 ```toml
 [dependencies.lib-algo-base]

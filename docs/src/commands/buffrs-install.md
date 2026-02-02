@@ -22,7 +22,7 @@ Layout](../guide/project-layout.md) for more information).
 
 By default, only one version of each package can be installed. If there is a
 conflicting requirement, installation will fail. However, starting with buffrs
-0.50.0, you can enable [multi-version dependencies](../guide/multi-version-dependencies.md)
+1.0.0, you can enable [multi-version dependencies](../guide/multi-version-dependencies.md)
 by adding `resolver = "multiversion"` to allow multiple versions of a package
 to coexist.
 

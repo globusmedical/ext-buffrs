@@ -71,7 +71,7 @@ logging = { version = "=1.0.0", registry = "<your-registry>", repository = "<you
 ##### Multi-Version Dependencies
 
 In larger projects, you may need different parts of your codebase to use
-different versions of the same package. Starting with buffrs 0.50.0, you can
+different versions of the same package. Starting with buffrs 1.0.0, you can
 enable this with `resolver = "multiversion"`:
 
 ```toml

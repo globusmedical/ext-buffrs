@@ -76,7 +76,7 @@ repository = "libs"
 
 ## Multi-Version Options
 
-Starting with buffrs 0.50.0, per-dependency multi-version control is available:
+Starting with buffrs 1.0.0, per-dependency multi-version control is available:
 
 ```toml
 [dependencies.lib-algo-base]

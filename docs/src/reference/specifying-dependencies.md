@@ -94,7 +94,7 @@ During `buffrs publish`, local paths are rewritten to registry references.
 
 ## Multi-Version Dependencies
 
-To allow multiple versions of a dependency (buffrs 0.50.0+):
+To allow multiple versions of a dependency (buffrs 1.0.0+):
 
 ```toml
 [dependencies.lib-algo-base]
