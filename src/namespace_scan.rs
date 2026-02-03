@@ -161,13 +161,14 @@ pub fn extract_proto_package(contents: &str) -> Option<String> {
 
     // Find first `package ...;` statement using regex.
     // Pattern: word boundary + "package" + whitespace + package name + optional whitespace + semicolon
-    // Package names consist of identifiers separated by dots: [a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*
-    static PACKAGE_RE: OnceLock<Regex> = OnceLock::new();
+    // Package names are parsed as: [a-zA-Z_][a-zA-Z0-9_.]* (a leading identifier char, followed by any combination of identifier chars and dots).
+    static PACKAGE_RE: OnceLock<Option<Regex>> = OnceLock::new();
     let re = PACKAGE_RE.get_or_init(|| {
-        Regex::new(r"(?m)(?:^|[^a-zA-Z0-9_])package\s+([a-zA-Z_][a-zA-Z0-9_.]*?)\s*;").unwrap()
+        Regex::new(r"(?m)(?:^|[^a-zA-Z0-9_])package\s+([a-zA-Z_][a-zA-Z0-9_.]*)\s*;").ok()
     });
 
-    re.captures(&out)
+    re.as_ref()?
+        .captures(&out)
         .and_then(|caps| caps.get(1))
         .map(|m| m.as_str().to_string())
 }
@@ -411,6 +412,18 @@ pub fn rewrite_proto_package(contents: &str, version: &Version) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_package_regex_compiles() {
+        // Ensure the hardcoded regex pattern is always valid
+        let regex =
+            regex::Regex::new(r"(?m)(?:^|[^a-zA-Z0-9_])package\s+([a-zA-Z_][a-zA-Z0-9_.]*)\s*;");
+        assert!(
+            regex.is_ok(),
+            "Package regex pattern should always compile: {:?}",
+            regex.err()
+        );
+    }
 
     #[test]
     fn test_extract_proto_package_simple() {
