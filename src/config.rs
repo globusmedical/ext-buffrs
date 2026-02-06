@@ -224,25 +224,33 @@ impl Config {
         let config = Self::parse_config(config_path)?;
 
         // Load edition from root of the config file
-        let edition = config
+        let edition: Edition = config
             .get("edition")
             .and_then(|edition| edition.as_str())
             .ok_or_else(|| miette!("missing or invalid 'edition' field in config file"))?
             .into();
 
-        match edition {
-            Edition::Canary => (),
-            _ => bail!("unsupported config file edition, supported editions: {CANARY_EDITION}"),
+        // Reject unknown editions; accept all known editions with version-appropriate parsing
+        if edition == Edition::Unknown {
+            let edition_str = config
+                .get("edition")
+                .and_then(|e| e.as_str())
+                .unwrap_or("<invalid>");
+            bail!(
+                "unsupported config file edition '{}', supported editions: 0.7, 0.8, 0.9, 0.10, {}",
+                edition_str,
+                CANARY_EDITION
+            );
         }
 
-        // Load registries from [registries] section
+        // Load registries from [registries] section (supported in all editions)
         let registries = Self::get_registries(&config, config_path)?;
 
-        // Locate default registry from [registry.default]
+        // Locate default registry from [registry.default] (supported in all editions)
         let default_registry = Self::get_default_registry(&config, &registries)?;
 
-        // Parse resolver settings
-        let resolver = Self::get_resolver_config(&config);
+        // Parse resolver settings only for edition 0.50+; older editions use defaults
+        let resolver = Self::get_resolver_config_for_edition(&config, &edition, config_path)?;
 
         // Parse command-specific default arguments from [commands.*] sections
         // (takes ownership of config)
@@ -258,7 +266,49 @@ impl Config {
         })
     }
 
-    fn get_resolver_config(config: &toml::Value) -> ResolverConfig {
+    /// Parse resolver config with edition-aware behavior.
+    ///
+    /// - Edition 0.50 (Canary): full [resolver] section support
+    /// - Editions 0.7-0.10: no [resolver] support; warn if present, use legacy defaults
+    fn get_resolver_config_for_edition(
+        config: &toml::Value,
+        edition: &Edition,
+        config_path: &Path,
+    ) -> miette::Result<ResolverConfig> {
+        let has_resolver_section = config.get("resolver").is_some();
+
+        match edition {
+            Edition::Canary => {
+                // Edition 0.50: parse [resolver] section if present
+                Ok(Self::parse_resolver_section(config))
+            }
+            Edition::Canary10 | Edition::Canary09 | Edition::Canary08 | Edition::Canary07 => {
+                // Older editions: [resolver] section not supported
+                if has_resolver_section {
+                    bail!(
+                        "[resolver] section is not supported in config edition '{}'; \
+                         upgrade to edition = \"{}\" in {}",
+                        <&str>::from(edition.clone()),
+                        CANARY_EDITION,
+                        config_path.display()
+                    );
+                }
+                // Legacy defaults: greedy resolver, no multi-version, link safety enabled
+                Ok(ResolverConfig {
+                    allow_multiple_versions: false,
+                    skip_link_safety_check: false,
+                    use_greedy_resolver: true, // pre-0.50 used greedy resolver
+                })
+            }
+            Edition::Unknown => {
+                // Should not reach here; caught earlier
+                unreachable!("unknown edition should be rejected before parsing resolver config")
+            }
+        }
+    }
+
+    /// Parse the [resolver] section from config (edition 0.50+)
+    fn parse_resolver_section(config: &toml::Value) -> ResolverConfig {
         let allow_multiple_versions = config
             .get("resolver")
             .and_then(|resolver| resolver.get("allow_multiple_versions"))
@@ -459,5 +509,93 @@ allow_multiple_versions = true
         );
 
         assert_eq!(config.allow_multiple_versions(), true);
+    }
+
+    #[test]
+    fn test_legacy_edition_010_uses_greedy_resolver() {
+        let tmp_dir = TempDir::new().unwrap();
+        let config_path = tmp_dir.path().join(CONFIG_FILE);
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        let mut file = File::create(&config_path).unwrap();
+        file.write_all(
+            br#"
+edition = "0.10"
+
+[registry]
+default = "globus"
+
+[registries]
+globus = "https://conan-us.globusmedical.com/artifactory"
+
+[commands.install]
+default_args = ["--generate-buf-yaml"]
+"#,
+        )
+        .unwrap();
+
+        let config = Config::new_from_config_file(&config_path).unwrap();
+        assert_eq!(config.edition, Edition::Canary10);
+        assert_eq!(config.default_registry, Some("globus".to_string()));
+        // Legacy editions use greedy resolver by default
+        assert!(config.use_greedy_resolver());
+        // Multi-version is disabled in legacy editions
+        assert!(!config.allow_multiple_versions());
+        // Link safety check is enabled in legacy editions
+        assert!(!config.skip_link_safety_check());
+    }
+
+    #[test]
+    fn test_legacy_edition_with_resolver_section_fails() {
+        let tmp_dir = TempDir::new().unwrap();
+        let config_path = tmp_dir.path().join(CONFIG_FILE);
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        let mut file = File::create(&config_path).unwrap();
+        file.write_all(
+            br#"
+edition = "0.10"
+
+[registries]
+globus = "https://conan-us.globusmedical.com/artifactory"
+
+[resolver]
+allow_multiple_versions = true
+"#,
+        )
+        .unwrap();
+
+        let result = Config::new_from_config_file(&config_path);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("[resolver] section is not supported"),
+            "Expected error about [resolver] not supported, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_unknown_edition_fails() {
+        let tmp_dir = TempDir::new().unwrap();
+        let config_path = tmp_dir.path().join(CONFIG_FILE);
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        let mut file = File::create(&config_path).unwrap();
+        file.write_all(
+            br#"
+edition = "99.99"
+
+[registries]
+acme = "https://conan.acme.com/artifactory"
+"#,
+        )
+        .unwrap();
+
+        let result = Config::new_from_config_file(&config_path);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unsupported config file edition '99.99'"),
+            "Expected error about unsupported edition, got: {}",
+            err
+        );
     }
 }
