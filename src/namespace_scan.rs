@@ -28,8 +28,10 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use miette::{miette, IntoDiagnostic};
+use regex::Regex;
 use semver::Version;
 use sha2::{Digest as Sha2Digest, Sha256};
 use tokio::fs;
@@ -157,47 +159,18 @@ pub fn extract_proto_package(contents: &str) -> Option<String> {
         out.push(c);
     }
 
-    // Find first `package ...;` statement.
-    let bytes = out.as_bytes();
-    let mut i = 0;
-    while i + 7 <= bytes.len() {
-        // look for "package" keyword
-        if &bytes[i..i + 7] == b"package" {
-            let prev_ok =
-                i == 0 || !matches!(bytes[i - 1], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
-            let next_ok =
-                i + 7 == bytes.len() || matches!(bytes[i + 7], b' ' | b'\t' | b'\r' | b'\n');
-            if prev_ok && next_ok {
-                let mut j = i + 7;
-                while j < bytes.len() && matches!(bytes[j], b' ' | b'\t' | b'\r' | b'\n') {
-                    j += 1;
-                }
-                let start = j;
-                while j < bytes.len()
-                    && matches!(
-                        bytes[j],
-                        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.'
-                    )
-                {
-                    j += 1;
-                }
-                if start == j {
-                    return None;
-                }
-                while j < bytes.len() && matches!(bytes[j], b' ' | b'\t' | b'\r' | b'\n') {
-                    j += 1;
-                }
-                if j < bytes.len() && bytes[j] == b';' {
-                    let pkg = String::from_utf8_lossy(&bytes[start..j]).trim().to_string();
-                    return Some(pkg);
-                }
-            }
-        }
+    // Find first `package ...;` statement using regex.
+    // Pattern: word boundary + "package" + whitespace + package name + optional whitespace + semicolon
+    // Package names are parsed as: [a-zA-Z_][a-zA-Z0-9_.]* (a leading identifier char, followed by any combination of identifier chars and dots).
+    static PACKAGE_RE: OnceLock<Option<Regex>> = OnceLock::new();
+    let re = PACKAGE_RE.get_or_init(|| {
+        Regex::new(r"(?m)(?:^|[^a-zA-Z0-9_])package\s+([a-zA-Z_][a-zA-Z0-9_.]*)\s*;").ok()
+    });
 
-        i += 1;
-    }
-
-    None
+    re.as_ref()?
+        .captures(&out)
+        .and_then(|caps| caps.get(1))
+        .map(|m| m.as_str().to_string())
 }
 
 /// Scans a directory for `.proto` files and extracts namespace declarations.
@@ -439,6 +412,18 @@ pub fn rewrite_proto_package(contents: &str, version: &Version) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_package_regex_compiles() {
+        // Ensure the hardcoded regex pattern is always valid
+        let regex =
+            regex::Regex::new(r"(?m)(?:^|[^a-zA-Z0-9_])package\s+([a-zA-Z_][a-zA-Z0-9_.]*)\s*;");
+        assert!(
+            regex.is_ok(),
+            "Package regex pattern should always compile: {:?}",
+            regex.err()
+        );
+    }
 
     #[test]
     fn test_extract_proto_package_simple() {

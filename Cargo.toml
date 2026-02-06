@@ -1,6 +1,6 @@
 [package]
 name = "buffrs"
-version = "1.2.0"
+version = "1.2.2"
 edition = "2021"
 description = "Modern protobuf package management"
 authors = [
@@ -55,6 +55,7 @@ protobuf-parse = { version = "3.3.0", optional = true }
 pubgrub = "0.3"
 reqwest = { version = "0.12", features = ["rustls-tls-native-roots"], default-features = false }
 semver = { version = "1", features = ["serde"] }
+regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 yaml_serde = "0.10"
