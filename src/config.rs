@@ -19,7 +19,7 @@ use std::{
 };
 
 use crate::{
-    manifest::{Edition, CANARY_EDITION, MANIFEST_FILE},
+    manifest::{Edition, CANARY_EDITION},
     registry::{RegistryRef, RegistryUri},
 };
 
@@ -197,14 +197,6 @@ impl Config {
                 let config_path = current_dir.join(CONFIG_FILE);
                 if config_path.exists() {
                     return Some(config_path);
-                }
-
-                // Stop searching above the nearest Proto.toml.
-                //
-                // This prevents accidental pickup of unrelated parent configs (e.g. from a user's
-                // home directory) and keeps config scoped to the current buffrs project tree.
-                if current_dir.join(MANIFEST_FILE).exists() {
-                    break;
                 }
 
                 if !current_dir.pop() {
