@@ -230,6 +230,11 @@ impl PackageStore {
 
             let resolved = if let Some(resolved) = resolved {
                 resolved
+            } else if deps.is_some() {
+                // During dependency graph building, transitive dependencies of
+                // path dependencies may not be resolved yet (they will be
+                // processed later by the graph builder). Skip validation here.
+                continue;
             } else {
                 self.resolve(&dependency.package, config).await?
             };
