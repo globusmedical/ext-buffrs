@@ -18,23 +18,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    environment:
-      name: Book
-      url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-      - name: Setup Pages
-        uses: actions/configure-pages@v3
-      - name: Setup mdbook
-        uses: peaceiris/actions-mdbook@v1.2.0
-      - run: cd docs && mdbook build
-      - name: Upload artifacts
-        uses: actions/upload-pages-artifact@v2
-        with:
-          path: "docs/book"
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v2
+  book:
+    uses: globusmedical/gm-github-actions/.github/workflows/mdbook-build.yml@mdbook-build/v1
+    with:
+      book-directory: docs
+      book-name: buffrs
+      deploy-to-pages: true
+      check-links: false
