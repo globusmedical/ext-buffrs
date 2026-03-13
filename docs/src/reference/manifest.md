@@ -48,12 +48,12 @@ repository = "common"
 | Field               | Required | Description                                                   |
 | ------------------- | -------- | ------------------------------------------------------------- |
 | `version`           | Yes      | Version requirement (e.g., `=1.0.0`, `^1.0`, `>=1.0,<2.0`)    |
-| `registry`          | Yes*     | Registry URL or alias                                         |
-| `repository`        | Yes*     | Repository name within the registry                           |
+| `registry`          | Yes\*    | Registry URL or alias                                         |
+| `repository`        | Yes\*    | Repository name within the registry                           |
 | `resolver`          | No       | Resolution mode: `default` or `multiversion`                  |
 | `namespace_overlap` | No       | For multiversion: `forbidden`, `identical_only`, or `allowed` |
 
-*Required for remote dependencies; omit for local dependencies.
+\*Required for remote dependencies; omit for local dependencies.
 
 ### Local Dependencies
 
@@ -96,11 +96,11 @@ namespace_overlap = "forbidden"     # Fail on namespace collision (default: rewr
 
 ### `namespace_overlap` Values
 
-| Value            | Description                                                          |
-| ---------------- | -------------------------------------------------------------------- |
+| Value            | Description                                                                |
+| ---------------- | -------------------------------------------------------------------------- |
 | `rewrite`        | Automatically rewrite package declarations with version suffixes (default) |
-| `identical_only` | Allow overlap only if proto file content hashes match                |
-| `forbidden`      | Fail if multiple versions declare the same protobuf namespace        |
+| `identical_only` | Allow overlap only if proto file content hashes match                      |
+| `forbidden`      | Fail if multiple versions declare the same protobuf namespace              |
 
 ## Edition
 

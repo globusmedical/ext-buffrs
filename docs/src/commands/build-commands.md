@@ -5,4 +5,4 @@ documentation from Buffrs-managed protocol buffer files.
 
 ## Index
 
-* [buffrs list](buffrs-list.md)
+- [buffrs list](buffrs-list.md)

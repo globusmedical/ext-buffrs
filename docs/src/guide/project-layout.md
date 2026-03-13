@@ -6,9 +6,9 @@ start in a clean manner and introspect the outcome.
 Lets create a new clean directory initialize for our `physic` library.
 
 ```
-$ mkdir physic
-$ cd physic
-$ buffrs init --lib
+mkdir physic
+cd physic
+buffrs init --lib
 ```
 
 This will initialize the following project structure:

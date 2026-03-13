@@ -2,9 +2,11 @@ name: Book
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main-gm"]
     paths:
-      - 'docs/**'
+      - "docs/**"
+      - ".github/workflows/book.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -32,7 +34,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-pages-artifact@v2
         with:
-          path: 'docs/book'
+          path: "docs/book"
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v2

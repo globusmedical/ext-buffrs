@@ -8,5 +8,5 @@ keeping the lockfile in sync.
 
 ## Index
 
-* [buffrs add](buffrs-add.md)
-* [buffrs remove](buffrs-remove.md)
+- [buffrs add](buffrs-add.md)
+- [buffrs remove](buffrs-remove.md)

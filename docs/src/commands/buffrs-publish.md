@@ -8,11 +8,11 @@ Generates a release and publishes it to the specified registry.
 
 ### Options
 
-* `--allow-dirty`: allows publishing the package even if the repository has
-uncommitted changes.
-* `--dry-run`: causes a release bundle to be generated but skips uploading to
+- `--allow-dirty`: allows publishing the package even if the repository has
+  uncommitted changes.
+- `--dry-run`: causes a release bundle to be generated but skips uploading to
   the registry.
-* `--set-version`: allows you to override the version set in the manifest
+- `--set-version`: allows you to override the version set in the manifest
 
 ### Description
 

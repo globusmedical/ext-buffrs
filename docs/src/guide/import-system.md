@@ -2,10 +2,10 @@
 
 To reuse already defined messages, protobuf files can be imported from both
 dependencies and the managed package itself. Unique identification of the files
-is made available through the name of the package as declared in ``Proto.toml``
+is made available through the name of the package as declared in `Proto.toml`
 which is used as root of the imports.
 
-For a dependency ``units``:
+For a dependency `units`:
 
 ```
 units
@@ -14,7 +14,7 @@ units
 └── length.proto
 ```
 
-and a package named ``physic``:
+and a package named `physic`:
 
 ```
 physic

@@ -12,7 +12,7 @@ Initializes a Buffrs project in a new folder created in the current directory.
 
 ### Description
 
-This command creates a new Buffrs project with the provided name by creating a 
+This command creates a new Buffrs project with the provided name by creating a
 manifest file (`Proto.toml`) as well as `proto` and `proto/vendor` directories
 in a new directory created at the current location.
 

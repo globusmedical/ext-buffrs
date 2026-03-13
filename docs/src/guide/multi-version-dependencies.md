@@ -1,6 +1,6 @@
 # Multi-Version Dependencies
 
-Starting with buffrs 1.0.0, you can opt-in to allow multiple versions of the same package to coexist in your dependency graph. This is useful in monorepo environments where different parts of your codebase may require different versions of the same protobuf package.
+Buffrs can allow multiple versions of the same package to coexist in one dependency graph. This is most useful during gRPC API migrations, when one part of a system still needs an older API while another part has already moved to a newer release.
 
 ## The Problem
 
@@ -28,7 +28,9 @@ version = "=0.1.3"
 resolver = "multiversion"
 ```
 
-This grants *permission* for buffrs to resolve multiple versions of `lib-algo-base` if the dependency constraints require it. It does not force duplicates—if a single version satisfies all constraints, only one version is resolved.
+The `lib-algo-base-new` key is a **package alias**. Aliases are how one `Proto.toml` can refer to two versions of the same package at the same time, so they are part of the multi-version workflow rather than a separate dependency model.
+
+This grants _permission_ for buffrs to resolve multiple versions of `lib-algo-base` if the dependency constraints require it. It does not force duplicates—if a single version satisfies all constraints, only one version is resolved.
 
 **Which dependencies need the flag?** All dependencies of the same package that may coexist need `resolver = "multiversion"`. The flag means "I accept coexisting with other versions of this package."
 
@@ -61,12 +63,12 @@ package gm.algo.base._v0_1_3_SPINE_4384;
 
 The version suffix follows the format `_v<major>_<minor>_<patch>` with special characters sanitized:
 
-| Version           | Suffix                   |
-| ----------------- | ------------------------ |
-| `0.1.2`           | `_v0_1_2`                |
-| `1.0.0`           | `_v1_0_0`                |
-| `0.1.3-SPINE-4384`| `_v0_1_3_SPINE_4384`     |
-| `2.0.0-beta.1`    | `_v2_0_0_beta_1`         |
+| Version            | Suffix               |
+| ------------------ | -------------------- |
+| `0.1.2`            | `_v0_1_2`            |
+| `1.0.0`            | `_v1_0_0`            |
+| `0.1.3-SPINE-4384` | `_v0_1_3_SPINE_4384` |
+| `2.0.0-beta.1`     | `_v2_0_0_beta_1`     |
 
 ## Impact on C++ Code
 
@@ -74,10 +76,10 @@ The version suffix follows the format `_v<major>_<minor>_<patch>` with special c
 
 The rewritten proto packages result in unique C++ namespaces:
 
-| Original Proto          | Version | Rewritten Proto                 | C++ Namespace              |
-| ----------------------- | ------- | ------------------------------- | -------------------------- |
-| `package gm.algo.base;` | 0.1.2   | `package gm.algo.base._v0_1_2;` | `gm::algo::base::_v0_1_2`  |
-| `package gm.algo.base;` | 0.1.3   | `package gm.algo.base._v0_1_3;` | `gm::algo::base::_v0_1_3`  |
+| Original Proto          | Version | Rewritten Proto                 | C++ Namespace             |
+| ----------------------- | ------- | ------------------------------- | ------------------------- |
+| `package gm.algo.base;` | 0.1.2   | `package gm.algo.base._v0_1_2;` | `gm::algo::base::_v0_1_2` |
+| `package gm.algo.base;` | 0.1.3   | `package gm.algo.base._v0_1_3;` | `gm::algo::base::_v0_1_3` |
 
 ### Consumer Code Example
 
@@ -128,10 +130,10 @@ use gm::algo::base::_v0_1_3 as algo_new;
 
 The rewritten proto packages result in unique Python module paths:
 
-| Original Proto          | Version | Rewritten Proto                 | Python Module Path                |
-| ----------------------- | ------- | ------------------------------- | --------------------------------- |
-| `package gm.algo.base;` | 0.1.2   | `package gm.algo.base._v0_1_2;` | `gm.algo.base._v0_1_2`            |
-| `package gm.algo.base;` | 0.1.3   | `package gm.algo.base._v0_1_3;` | `gm.algo.base._v0_1_3`            |
+| Original Proto          | Version | Rewritten Proto                 | Python Module Path     |
+| ----------------------- | ------- | ------------------------------- | ---------------------- |
+| `package gm.algo.base;` | 0.1.2   | `package gm.algo.base._v0_1_2;` | `gm.algo.base._v0_1_2` |
+| `package gm.algo.base;` | 0.1.3   | `package gm.algo.base._v0_1_3;` | `gm.algo.base._v0_1_3` |
 
 ### Single-Version Python (No Changes Required)
 

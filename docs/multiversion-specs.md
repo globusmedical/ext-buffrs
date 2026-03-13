@@ -101,7 +101,7 @@ Multi-version resolution is introduced within that scope only. Cross-`Proto.toml
 2. **Link-time correctness** (across multiple CMake targets):
    - detect whether a final binary links two different versions with overlapping protobuf namespaces
    - fail by default with actionable diagnostics
-   - this check must reflect the *actual* set of targets linked in the current build configuration
+   - this check must reflect the _actual_ set of targets linked in the current build configuration
    - with namespace rewriting, conflicts become impossible within a single `Proto.toml` but may still occur across different `Proto.toml`s that resolve overlapping versions without both enabling multiversion
 
 This model addresses the monorepo reality: different builds link different subsets of targets.
@@ -115,7 +115,7 @@ Per-dependency opt-in, permission semantics:
 ```toml
 [dependencies]
 api-algo-autoscrewdesign = { version = "0.1.2-SPINE-4431", resolver = "multiversion" }
-````
+```
 
 Optional namespace policy override (default `forbidden`):
 
@@ -129,7 +129,7 @@ api-algo-autoscrewdesign = { version = "0.1.2-SPINE-4431", resolver = "multivers
 Notes:
 
 - `resolver = "multiversion"` enables multi-version permission for this dependency edge only.
-- `namespace_overlap` controls what happens if multi-version leads to overlapping protobuf namespaces *in the final link unit*.
+- `namespace_overlap` controls what happens if multi-version leads to overlapping protobuf namespaces _in the final link unit_.
 
 ### Vendor layout
 
@@ -142,7 +142,6 @@ A stable, version-agnostic include root is also emitted to support deterministic
 
 1. **Explicit versioned include roots**: include `proto/vendor/lib-algo-base@0.1.2` and `proto/vendor/lib-algo-base@0.1.3` as separate `-I` roots.
 2. **Generated “include index” directory** (recommended for CMake):
-
    - Buffrs generates `proto/vendor/_buffrs_includes/<name>@<ver>/` symlinks (or copies on platforms without symlinks) pointing to the real vendor dirs.
    - This yields stable paths and avoids accidental include path shadowing.
 
@@ -158,7 +157,6 @@ A stable, version-agnostic include root is also emitted to support deterministic
 Lockfile validation rules:
 
 - if `Proto.lock` contains two versions of the same name but no manifest edge enables multi-version for that name, fail with:
-
   - which name requires multiversion
   - which manifest(s) must be updated
   - how to regenerate the lockfile
@@ -225,11 +223,10 @@ Buffrs provides a CMake function:
 Implementation strategy:
 
 - Each generated per-package target carries an INTERFACE property containing its protobuf namespace signature, e.g.:
-
   - `BUFFRS_PROTO_NAMESPACES` = `lib.algo.base=lib-algo-base@0.1.2;...`
+
 - `buffrs_validate_link_unit` walks the transitive link closure of `<final_target>` and collects all namespace signatures.
 - If the same namespace appears with two different `package@version` values, it fails the configure step (or generate step) with an actionable error including:
-
   - the namespace
   - both `package@version`
   - the CMake target chain that introduced each version
@@ -250,11 +247,10 @@ Default:
 Optional:
 
 - `namespace_overlap = "identical_only"`:
-
   - allow overlap only if content hashes of the effective `.proto` file sets match
   - error if hashes differ
-- `namespace_overlap = "allowed"`:
 
+- `namespace_overlap = "allowed"`:
   - allowed only if explicitly set per dependency edge
   - emits a prominent warning in diagnostics output
   - still provides full reporting of overlapping namespaces
@@ -322,16 +318,15 @@ On conflict, error output includes:
 
 - conflicting namespace: `lib.algo.base`
 - versions:
-
   - `lib-algo-base@0.1.2`
   - `lib-algo-base@0.1.3`
+
 - example `.proto` file paths under each vendor directory showing the declarations
 - link provenance:
-
   - final target
   - transitive CMake link chain to each `buffrs::...@...` target
-- manifest provenance:
 
+- manifest provenance:
   - which `Proto.toml` roots pulled each version
 
 ## Non-goals

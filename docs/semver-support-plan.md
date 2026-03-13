@@ -17,10 +17,9 @@ For example: '=1.0.4' instead of '^1.0.0'
 
 ### Upstream Status
 
-The upstream [helsing-ai/buffrs](https://github.com/helsing-ai/buffrs) has the same limitation,
-tracked in [issue #205](https://github.com/helsing-ai/buffrs/issues/205). They suggest using
-[PubGrub](https://github.com/pubgrub-rs/pubgrub) for SAT-based dependency resolution, but no
-implementation has been started.
+The original project had the same limitation, which is why `ext-buffrs` implements
+full SemVer support here. The chosen approach uses
+[PubGrub](https://github.com/pubgrub-rs/pubgrub) for SAT-based dependency resolution.
 
 ## Implementation Plan
 
@@ -184,14 +183,14 @@ Multiple requirements can be combined with commas: `>=1.2.3, <2.0.0`
 
 ## Implementation Status
 
-| Phase                         | Status      | Notes                                       |
-| ----------------------------- | ----------- | ------------------------------------------- |
-| 1. Registry Version Discovery | ✅ Complete | `list_versions()` added to artifactory.rs   |
-| 2. Resolver Changes           | ✅ Complete | `resolve_version()` in resolver.rs          |
-| 3. CLI Updates                | ✅ Complete | All semver operators accepted               |
-| 4. Documentation              | ✅ Complete | `docs/src/reference/semver.md` updated      |
-| 5. Unit Tests                 | ✅ Complete | 27 tests for greedy version selection       |
-| 6. PubGrub SAT Resolution     | ✅ Complete | Full integration in resolver.rs             |
+| Phase                         | Status      | Notes                                     |
+| ----------------------------- | ----------- | ----------------------------------------- |
+| 1. Registry Version Discovery | ✅ Complete | `list_versions()` added to artifactory.rs |
+| 2. Resolver Changes           | ✅ Complete | `resolve_version()` in resolver.rs        |
+| 3. CLI Updates                | ✅ Complete | All semver operators accepted             |
+| 4. Documentation              | ✅ Complete | `docs/src/reference/semver.md` updated    |
+| 5. Unit Tests                 | ✅ Complete | 27 tests for greedy version selection     |
+| 6. PubGrub SAT Resolution     | ✅ Complete | Full integration in resolver.rs           |
 
 ## Current Limitations
 
@@ -214,6 +213,7 @@ root
 ```
 
 **What happens:**
+
 1. Resolver processes A first, resolves C to 2.0.0 (highest matching `^1.0.0`)
 2. Resolver processes B, needs C `>=1.2.0, <1.5.0`
 3. **Conflict!** C@2.0.0 was already selected but doesn't satisfy B's constraint
@@ -235,6 +235,7 @@ If selecting the highest version causes a conflict downstream, the resolver cann
 ### Pre-release Handling
 
 Pre-release versions (e.g., `1.0.0-alpha.1`) are only matched by:
+
 - Exact requirements: `=1.0.0-alpha.1`
 - Explicit pre-release comparisons: `>=1.0.0-alpha.1`
 
@@ -251,7 +252,7 @@ The semver crate uses comma as AND (intersection), not OR (union). You cannot ex
 ### What is PubGrub?
 
 [PubGrub](https://github.com/pubgrub-rs/pubgrub) is a version solving algorithm developed
-by Natalie Weizenbaum for the Dart package manager. It uses **satisfiability (SAT)** 
+by Natalie Weizenbaum for the Dart package manager. It uses **satisfiability (SAT)**
 principles to find a consistent set of package versions.
 
 ### Benefits of PubGrub
@@ -266,7 +267,7 @@ principles to find a consistent set of package versions.
    - Explores the solution space systematically
 
 3. **Clear Error Messages**
-   - When no solution exists, explains *why* using "incompatibility" tracking
+   - When no solution exists, explains _why_ using "incompatibility" tracking
    - Example: "Because A 1.5.0 requires C ^2.0.0 and B 1.3.0 requires C <1.5.0,
      A 1.5.0 is incompatible with B 1.3.0"
 
@@ -277,11 +278,13 @@ principles to find a consistent set of package versions.
 ### When Do You Need PubGrub?
 
 You likely **don't need** SAT-based resolution if:
+
 - Your dependency tree is shallow (1-2 levels)
 - You have few dependencies with overlapping transitive deps
 - You control all packages in your ecosystem
 
 You likely **do need** SAT-based resolution if:
+
 - Complex dependency graphs with deep transitive deps
 - Multiple packages depending on shared libraries with different constraints
 - Large ecosystem with many independent package authors
@@ -304,17 +307,17 @@ The PubGrub SAT-based resolver is now fully integrated into the resolver pipelin
 
 ### New Files
 
-| File                       | Description                                    |
-| -------------------------- | ---------------------------------------------- |
-| `src/pubgrub_resolver.rs`  | PubGrub-based SAT resolver implementation      |
+| File                      | Description                               |
+| ------------------------- | ----------------------------------------- |
+| `src/pubgrub_resolver.rs` | PubGrub-based SAT resolver implementation |
 
 ### Modified Files
 
-| File                       | Changes                                        |
-| -------------------------- | ---------------------------------------------- |
-| `src/resolver.rs`          | Added `build_with_pubgrub()` method            |
-| `src/config.rs`            | Added `use_greedy_resolver` config option      |
-| `Cargo.toml`               | Added `pubgrub = "0.3"` dependency             |
+| File              | Changes                                   |
+| ----------------- | ----------------------------------------- |
+| `src/resolver.rs` | Added `build_with_pubgrub()` method       |
+| `src/config.rs`   | Added `use_greedy_resolver` config option |
+| `Cargo.toml`      | Added `pubgrub = "0.3"` dependency        |
 
 ### Resolver Selection
 
@@ -368,7 +371,7 @@ pub fn resolve(provider: &BuffrsDependencyProvider) -> ResolutionResult;
 ### Limitations
 
 - **Multi-version resolution**: PubGrub produces single-version solutions per package. If
-    multi-version resolution is required, buffrs falls back to greedy.
+  multi-version resolution is required, buffrs falls back to greedy.
 - **Performance**: Discovery phase downloads all versions to get dependency metadata (can be slow)
 - **Network-heavy**: Requires fetching all package versions upfront
 

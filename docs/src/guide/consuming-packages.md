@@ -8,12 +8,12 @@ to consume buffrs packages that contain your type and service definitions?
 So there are three scenarios in which you would want to depend on other packages:
 
 a) You are defining a library and you want to make use of an external type
-   coming from another library (e.g. `google` for basic types such as
-   `google.None`).
+coming from another library (e.g. `google` for basic types such as
+`google.None`).
 b) You are defining an API and you want to use libraries to reuse common types
-   for that domain (e.g. `time` or `physics`)
+for that domain (e.g. `time` or `physics`)
 c) You are implementing your server and you want to get access to API
-   definitions to generate bindings.
+definitions to generate bindings.
 
 The good news are: They are all achieved in a similar fashion. You make use of
 the `[dependencies]` key in your manifest to declare the packages that your
@@ -39,7 +39,6 @@ google = { version = "=1.0.0", registry = "<your-registry>", repository = "<your
 ```
 
 Running `buffrs install` yields you with the following filesystem:
-
 
 ```text
 time

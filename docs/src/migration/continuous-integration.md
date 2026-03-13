@@ -1,9 +1,9 @@
-## Continuous Integration
+# Continuous Integration
 
 To utilize continuous integration for your Buffrs package (e.g. to automate code review and publishing
 of your packages) you can utilize the following templates for GitHub Actions and GitLab CI:
 
-### GitHub Actions
+## GitHub Actions
 
 ```yaml
 name: Buffrs
@@ -11,11 +11,12 @@ name: Buffrs
 on:
   push:
     branches:
-      - '*'
+      - "*"
   tags:
-    - '*'
+    - "*"
 
 env:
+  BUFFRS_VERSION: 1.2.6
   REGISTRY: https://<org>.jfrog.io/artifactoy
   REPOSITORY: your-artifactory-repo
 
@@ -38,9 +39,16 @@ jobs:
           rustup target add aarch64-unknown-linux-gnu
         shell: bash
 
+      - name: Install Buffrs
+        run: |
+          curl -L -o buffrs.tar.gz https://github.com/globusmedical/ext-buffrs/releases/download/gm%2Fv${BUFFRS_VERSION}/v${BUFFRS_VERSION}-x86_64-unknown-linux-gnu.tar.gz
+          tar -xzf buffrs.tar.gz
+          install -m 755 buffrs "$HOME/.local/bin/buffrs"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        shell: bash
+
       - name: Verify
         run: |
-          cargo install --force buffrs
           echo $TOKEN | buffrs login --registry $REGISTRY
           buffrs lint
         env:
@@ -56,18 +64,24 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v2
 
+      - name: Install Buffrs
+        run: |
+          curl -L -o buffrs.tar.gz https://github.com/globusmedical/ext-buffrs/releases/download/gm%2Fv${BUFFRS_VERSION}/v${BUFFRS_VERSION}-x86_64-unknown-linux-gnu.tar.gz
+          tar -xzf buffrs.tar.gz
+          install -m 755 buffrs "$HOME/.local/bin/buffrs"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        shell: bash
+
       - name: Publish on tag
         run: |
-          cargo install --force buffrs
           echo $TOKEN | buffrs login --registry $REGISTRY
           buffrs publish --registry $REGISTRY --repository $REPOSITORY
         env:
           TOKEN: ${{ secrets.BUFFRS_TOKEN }}
         shell: bash
-
 ```
 
-### GitLab CI
+## GitLab CI
 
 ```yaml
 stages:
@@ -75,14 +89,18 @@ stages:
   - publish
 
 variables:
-  TOKEN: $BUFFRS_TOKEN  # Your secret artifactory token
+  BUFFRS_VERSION: 1.2.6
+  TOKEN: $BUFFRS_TOKEN # Your secret artifactory token
   REGISTRY: https://<org>.jfrog.io/artifactory
   REPOSITORY: your-artifactory-repo
 
 verify:
   stage: verify
   script:
-    - cargo install buffrs
+    - curl -L -o buffrs.tar.gz https://github.com/globusmedical/ext-buffrs/releases/download/gm%2Fv${BUFFRS_VERSION}/v${BUFFRS_VERSION}-x86_64-unknown-linux-gnu.tar.gz
+    - tar -xzf buffrs.tar.gz
+    - install -m 755 buffrs "$HOME/.local/bin/buffrs"
+    - export PATH="$HOME/.local/bin:$PATH"
     - echo $TOKEN | buffrs login --registry $REGISTRY
     - buffrs lint
   only:
@@ -91,7 +109,10 @@ verify:
 publish:
   stage: publish
   script:
-    - cargo install buffrs
+    - curl -L -o buffrs.tar.gz https://github.com/globusmedical/ext-buffrs/releases/download/gm%2Fv${BUFFRS_VERSION}/v${BUFFRS_VERSION}-x86_64-unknown-linux-gnu.tar.gz
+    - tar -xzf buffrs.tar.gz
+    - install -m 755 buffrs "$HOME/.local/bin/buffrs"
+    - export PATH="$HOME/.local/bin:$PATH"
     - echo $TOKEN | buffrs login --registry $REGISTRY
     - buffrs publish --registry $REGISTRY --repository $REPOSITORY
   only:

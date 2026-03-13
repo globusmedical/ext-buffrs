@@ -14,8 +14,8 @@ authors = [
   "Tom Karwowski <tom.karwowski@helsing.ai>",
   "Daniel Gehriger <dgehriger@globusmedical.com>"
 ]
-repository = "https://github.com/helsing-ai/buffrs"
-documentation = "https://docs.rs/buffrs"
+repository = "https://github.com/globusmedical/ext-buffrs"
+documentation = "https://globusmedical.github.io/ext-buffrs/"
 keywords = ["protobuf", "protocol", "buffers", "package", "distribution"]
 categories = ["command-line-utilities"]
 readme = "README.md"

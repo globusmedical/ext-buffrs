@@ -84,7 +84,7 @@ impl Diagnostic for Violation {
 
     fn url<'a>(&'a self) -> Option<Box<dyn Display + 'a>> {
         Some(Box::new(
-            "https://helsing-ai.github.io/buffrs/reference/protocol-buffer-rules.html",
+            "https://globusmedical.github.io/ext-buffrs/reference/protocol-buffer-rules.html",
         ))
     }
 

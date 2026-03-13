@@ -8,10 +8,9 @@ Generates a release tarball for the package in the current directory.
 
 ### Options
 
-* `--dry-run`: prevents buffrs from actually writing the tarball to the filesystem
-* `--output-directory`: allows you to specify a directory to output the package
-* `--set-version`: allows you to override the version set in the manifest
-
+- `--dry-run`: prevents buffrs from actually writing the tarball to the filesystem
+- `--output-directory`: allows you to specify a directory to output the package
+- `--set-version`: allows you to override the version set in the manifest
 
 ### Description
 

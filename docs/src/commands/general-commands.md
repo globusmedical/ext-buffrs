@@ -6,5 +6,5 @@ information.
 
 ## Index
 
-* [buffrs](buffrs.md)
-* [buffrs help](buffrs-help.md)
+- [buffrs](buffrs.md)
+- [buffrs help](buffrs-help.md)

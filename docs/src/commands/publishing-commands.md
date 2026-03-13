@@ -7,6 +7,6 @@ Also in this category are commands to manage locally saved registry credentials.
 
 ## Index
 
-* [buffrs login](buffrs-login.md)
-* [buffrs logout](buffrs-logout.md)
-* [buffrs publish](buffrs-publish.md)
+- [buffrs login](buffrs-login.md)
+- [buffrs logout](buffrs-logout.md)
+- [buffrs publish](buffrs-publish.md)

@@ -1,4 +1,4 @@
-## Why Buffrs Exists
+# Why Buffrs Exists
 
 Modern gRPC based software platforms make extensive use of protocol buffers to
 define and implement inter-service APIs. While the open-source protocol buffers
@@ -15,13 +15,5 @@ buffers. Using Buffrs, engineers package protocol buffer definitions, publish
 them to a shared registry, and integrate them seamlessly into their projects
 using versioned API dependencies and batteries-included build tool integration.
 
-For a detailed differentiation against existing approaches (like [buf], [bazel]
-and [git submodules]) and architecture deep dive take a look at the
-_[announcement post.]_
-
-<!-- ### Differerntion -->
-
-[announcement post.]: https://blog.helsing.ai/buffrs-a-package-manager-for-protocol-buffers-1-2-aaf7c00153d2
-[buf]: https://buf.build/
-[bazel]: https://bazel.build/
-[git submodules]: https://git-scm.com/book/en/v2/Git-Tools-Submodules
+For the practical workflow, continue with the [Getting Started](../getting-started/index.md)
+guide and the rest of this book.

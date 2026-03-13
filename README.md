@@ -1,101 +1,68 @@
-<!-- markdownlint-disable-next-line -->
-<div align="center">
-
-<img src="https://github.com/helsing-ai/buffrs/assets/37018485/76c51445-b5a6-4f4e-a39c-7de7e31a0613" onerror="this.style.display='none'" />
-<br/>
-
 # Buffrs
 
-**Modern protobuf package management**
+Package management for versioned Protocol Buffer and gRPC APIs.
 
-[![Helsing](https://img.shields.io/badge/helsing-open%20source-black.svg)](https://helsing.ai)
-[![Buffrs Crate](https://img.shields.io/crates/v/buffrs.svg)](https://crates.io/crates/buffrs)
-[![Buffrs Book](https://img.shields.io/badge/book-latest-blueviolet.svg)](https://helsing-ai.github.io/buffrs)
-[![Buffrs Docs](https://img.shields.io/badge/docs-latest-blue.svg)](https://docs.rs/buffrs)
-![Nix Flake](https://img.shields.io/github/actions/workflow/status/helsing-ai/buffrs/nix.yml?logo=nixos&label=flake)
+[![Repository](https://img.shields.io/badge/github-globusmedical%2Fext--buffrs-181717?logo=github)](https://github.com/globusmedical/ext-buffrs)
+[![Buffrs Book](https://img.shields.io/badge/book-internal%20docs-blueviolet.svg)](https://globusmedical.github.io/ext-buffrs/)
+[![Releases](https://img.shields.io/github/v/release/globusmedical/ext-buffrs?display_name=tag&sort=semver)](https://github.com/globusmedical/ext-buffrs/releases)
 
-</div>
+Buffrs helps teams version, publish, and consume shared protobuf definitions as reusable API packages. In the Globus Medical fork, the focus is reliable dependency management for internal gRPC APIs: full semantic version support, reproducible lockfiles, and side-by-side multi-version installs when migrations overlap.
+
+Install Buffrs from [GitHub Releases](https://github.com/globusmedical/ext-buffrs/releases) or build it from source in this repository.
 
 ## Quickstart
 
 ```bash,ignore
-$ cargo install buffrs
-$ buffrs login
-$ buffrs init --api
-$ buffrs add <dependency>
-$ buffrs install
+buffrs login --registry https://your-registry.example.com/artifactory
+buffrs init --api
+buffrs add --registry https://your-registry.example.com/artifactory team/my-api@^1.2.3
+buffrs install
 ```
 
 Useful resources:
 
-- [The Buffrs Book](https://helsing-ai.github.io/buffrs)
-- [Crate Documentation](https://docs.rs/buffrs)
-- [Announcement Post](https://blog.helsing.ai/buffrs-a-package-manager-for-protocol-buffers-1-2-aaf7c00153d2)
+- [The Buffrs Book](https://globusmedical.github.io/ext-buffrs/)
+- [GitHub Releases](https://github.com/globusmedical/ext-buffrs/releases)
+- [Source Repository](https://github.com/globusmedical/ext-buffrs)
 - `buffrs help`
 
 ## Synopsis
 
 ```text,ignore
-Modern protobuf package management
+Package management for versioned Protocol Buffer and gRPC APIs
 
 Usage: buffrs <COMMAND>
 
 Commands:
-  init       Initializes a buffrs setup
-  new        Creates a new buffrs package in the current directory
-  lint       Check rule violations for this package
-  add        Adds dependencies to a manifest file
-  remove     Removes dependencies from a manifest file
-  package    Exports the current package into a distributable tgz archive
-  publish    Packages and uploads this api to the registry
-  install    Installs dependencies
-  uninstall  Uninstalls dependencies
-  list       Lists all protobuf files managed by Buffrs to stdout
-  login      Logs you in for a registry
-  logout     Logs you out from a registry
-  lock       Lockfile related commands
-  help       Print this message or the help of the given subcommand(s)
+  init         Initializes a buffrs setup
+  new          Creates a new buffrs package in the current directory
+  lint         Check rule violations for this package
+  add          Adds dependencies to a manifest file
+  remove       Removes dependencies from a manifest file
+  package      Exports the current package into a distributable tgz archive
+  publish      Packages and uploads this api to the registry
+  install      Installs dependencies
+  uninstall    Uninstalls dependencies
+  list         Lists all protobuf files managed by Buffrs to stdout
+  login        Logs you in for a registry
+  logout       Logs you out from a registry
+  lock         Lockfile related commands
+  self-update  Update buffrs to the latest version
+  help         Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help     Print help
   -V, --version  Print version
 ```
 
-## Motivation
+## Why teams use Buffrs
 
-Protocol buffers are agreeably a great way to define fully typed,
-language-independent API schemas with strong backward compatibility guarantees.
-They offer a neat experience for API consumers through generated bindings. *The
-biggest problem associated with Protocol Buffers is their distribution.*
+- **Full SemVer support for gRPC API dependencies**: use `^`, `~`, ranges, exact pins, and prereleases in `Proto.toml`.
+- **Multi-version API support for migrations**: keep two versions of the same API side by side when a rollout cannot happen all at once.
+- **Package aliases for side-by-side versions**: declare the same package twice under different keys when multi-version dependencies are enabled.
+- **Reproducible installs**: lock exact resolutions in `Proto.lock`.
+- **Build-tool integration**: integrate generated artifacts into Cargo, CMake, Python, and other workflows.
 
-- How do you consume the raw protobuf files of one project reliably in another
-  one?
-- How do you prevent transitive dependencies?
-- How do you publish to a unified registry with package format across
-  languages?
+## Documentation
 
-One obvious way is to generate code bindings in the repository containing the
-Protocol Buffers and publish the generated bindings, but this is associated
-with problems such as language lock-in. You need to proactively publish
-bindings for any possible language your API consumers may use. Also, in
-strongly typed languages like Rust, it is hard to extend the behavior of
-generated code in consuming projects due to _the orphan rule_. Summing up: this
-approach works somehow but hurts frequently.
-
-This is where Buffrs comes in: Buffrs solves this by defining a strict,
-package-based distribution mechanism and treats Protocol Buffers as a
-first-class citizen.
-
-*This allows you to publish Buffrs packages to a registry and properly depend
-on them in other projects.*
-
-
-## Roadmap
-
-- [x] Support project manifests and dependency declaration
-- [x] Support package distribution via Artifactory
-- [x] Support tonic as code generation backend
-- [x] Support protoc as code generation backend
-- [ ] Implement `buffrs-registry`, a self-hostable, S3-based registry.
-- [ ] Supply tooling around Protocol Buffers, such as bindgen, linting, validation and
-  formatting.
+Start with [the book](https://globusmedical.github.io/ext-buffrs/) for installation, workflows, and command reference.
