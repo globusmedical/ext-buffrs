@@ -63,7 +63,7 @@ pub async fn init(kind: Option<PackageType>, name: Option<PackageName>) -> miett
 
     let package = kind
         .map(|kind| -> miette::Result<PackageManifest> {
-            let name = name.map(Result::Ok).unwrap_or_else(curr_dir_name)?;
+            let name = name.map_or_else(curr_dir_name, Result::Ok)?;
 
             Ok(PackageManifest {
                 kind,
@@ -149,10 +149,10 @@ impl FromStr for DependencyLocator {
 
         let repository = repository.into();
 
-        let (package, version) = dependency
-            .split_once('@')
-            .map(|(package, version)| (package, Some(version)))
-            .unwrap_or_else(|| (dependency, None));
+        let (package, version) = dependency.split_once('@').map_or_else(
+            || (dependency, None),
+            |(package, version)| (package, Some(version)),
+        );
 
         let package = package
             .parse::<PackageName>()
@@ -404,8 +404,8 @@ async fn rewrite_proto_namespaces_in_dir(dir: &Path, version: &Version) -> miett
     // Collect all proto file paths first to avoid holding WalkDir handles while writing
     let proto_files: Vec<_> = WalkDir::new(dir)
         .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "proto"))
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "proto"))
         .map(|e| e.path().to_path_buf())
         .collect();
 
@@ -704,18 +704,18 @@ pub async fn install(
                                 // With Rewrite policy, namespaces should have been rewritten during install.
                                 // A collision here means rewriting didn't apply or these are shared types.
                                 // Check if content is identical (shared base types are OK).
-                                if &content_hash != other_hash {
+                                if &content_hash == other_hash {
+                                    tracing::debug!(
+                                        ":: namespace overlap (identical content): '{}' in {} and {}",
+                                        pkg, other_id, id
+                                    );
+                                } else {
                                     tracing::warn!(
                                         ":: namespace collision after rewrite: '{}' declared by {} and {} with different content",
                                         pkg, other_id, id
                                     );
                                     tracing::warn!(
                                         "   This may indicate a bug in namespace rewriting or incompatible shared types"
-                                    );
-                                } else {
-                                    tracing::debug!(
-                                        ":: namespace overlap (identical content): '{}' in {} and {}",
-                                        pkg, other_id, id
                                     );
                                 }
                             }
@@ -817,14 +817,14 @@ pub async fn list(config: &Config) -> miette::Result<()> {
             .wrap_err(miette!("failed to canonicalize current directory"))?
     };
 
-    for proto in protos.iter() {
+    for proto in &protos {
         let rel = proto
             .strip_prefix(&cwd)
             .into_diagnostic()
             .wrap_err(miette!("failed to transform protobuf path"))?
             .to_posix_string();
 
-        print!("{rel} ")
+        print!("{rel} ");
     }
 
     Ok(())
@@ -866,22 +866,21 @@ pub async fn login(
     let mut credentials = Credentials::load().await?;
     let registry: RegistryUri = registry.with_alias_resolved(Some(config))?.try_into()?;
 
-    let token = match token {
-        Some(token) => token,
-        None => {
-            tracing::info!(":: please enter your artifactory token:");
+    let token = if let Some(token) = token {
+        token
+    } else {
+        tracing::info!(":: please enter your artifactory token:");
 
-            let mut raw = String::new();
-            let mut reader = BufReader::new(io::stdin());
+        let mut raw = String::new();
+        let mut reader = BufReader::new(io::stdin());
 
-            reader
-                .read_line(&mut raw)
-                .await
-                .into_diagnostic()
-                .wrap_err(miette!("failed to read the token from the user"))?;
+        reader
+            .read_line(&mut raw)
+            .await
+            .into_diagnostic()
+            .wrap_err(miette!("failed to read the token from the user"))?;
 
-            raw.trim().into()
-        }
+        raw.trim().into()
     };
 
     credentials.registry_tokens.insert(registry.clone(), token);

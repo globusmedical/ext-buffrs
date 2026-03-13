@@ -33,6 +33,7 @@ pub enum DigestAlgorithm {
 
 impl DigestAlgorithm {
     /// Create a digest of some data using this algorithm.
+    #[must_use]
     pub fn digest(&self, data: &[u8]) -> Digest {
         let digest = match self {
             DigestAlgorithm::SHA256 => sha2::Sha256::new().chain_update(data).finalize().to_vec(),
@@ -96,11 +97,13 @@ impl Digest {
     }
 
     /// Algorithm used to create this digest.
+    #[must_use]
     pub fn algorithm(&self) -> DigestAlgorithm {
         self.algorithm
     }
 
     /// Digest as raw byte data.
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.digest
     }
@@ -153,7 +156,7 @@ impl Serialize for Digest {
 struct DigestVisitor;
 
 #[allow(clippy::needless_lifetimes)]
-impl<'de> Visitor<'de> for DigestVisitor {
+impl Visitor<'_> for DigestVisitor {
     type Value = Digest;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {

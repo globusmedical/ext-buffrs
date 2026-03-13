@@ -114,7 +114,7 @@ impl Cache {
         let dir = WalkDir::new(self.path())
             .max_depth(1)
             .into_iter()
-            .filter_map(|e| e.ok());
+            .filter_map(std::result::Result::ok);
 
         let (dirs, files): (Vec<_>, Vec<_>) = dir.partition(|e| e.path().is_dir());
 
@@ -218,6 +218,7 @@ impl Cache {
     }
 
     /// The directory in the filesystem used by this cache
+    #[must_use]
     pub fn path(&self) -> &Path {
         self.0.as_path()
     }
@@ -230,6 +231,7 @@ pub struct Entry(PathBuf);
 
 impl Entry {
     /// The filename of the cache entry
+    #[must_use]
     pub fn filename(&self) -> &Path {
         self.0.as_path()
     }

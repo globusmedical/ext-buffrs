@@ -66,7 +66,7 @@ pub struct PackageNamespaces {
 #[derive(Debug, Clone, Default)]
 pub struct NamespaceScanResult {
     /// Mapping from namespace to list of packages declaring it with content hash.
-    /// Tuple is (package_name, version, source_file, content_hash).
+    /// Tuple is (`package_name`, version, `source_file`, `content_hash`).
     /// If a namespace maps to multiple packages, there's a potential conflict.
     pub namespace_to_packages: HashMap<String, Vec<(PackageName, Version, String, String)>>,
     /// All packages with their namespace declarations.
@@ -75,6 +75,7 @@ pub struct NamespaceScanResult {
 
 impl NamespaceScanResult {
     /// Returns namespaces that are declared by more than one package@version.
+    #[must_use]
     pub fn conflicts(&self) -> Vec<(&String, &[(PackageName, Version, String, String)])> {
         self.namespace_to_packages
             .iter()
@@ -92,6 +93,7 @@ impl NamespaceScanResult {
 
     /// Returns namespaces where different versions have non-identical content.
     /// This is used for `identical_only` policy validation.
+    #[must_use]
     pub fn content_conflicts(&self) -> Vec<(&String, &[(PackageName, Version, String, String)])> {
         self.namespace_to_packages
             .iter()
@@ -109,6 +111,7 @@ impl NamespaceScanResult {
 }
 
 /// Compute SHA-256 hash of content (hex-encoded).
+#[must_use]
 pub fn content_hash(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
@@ -139,7 +142,7 @@ pub fn extract_proto_package(contents: &str) -> Option<String> {
             match chars.peek().copied() {
                 Some('/') => {
                     // line comment
-                    while let Some(nc) = chars.next() {
+                    for nc in chars.by_ref() {
                         if nc == '\n' {
                             out.push('\n');
                             break;
@@ -179,8 +182,8 @@ pub async fn scan_directory(dir: &Path) -> miette::Result<Vec<NamespaceInfo>> {
 
     for entry in WalkDir::new(dir)
         .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "proto"))
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "proto"))
     {
         let path = entry.path();
         let contents = fs::read_to_string(path)
@@ -269,6 +272,7 @@ pub async fn scan_dependency_graph(
 /// - `1.0.0` → `_v1_0_0`
 /// - `0.1.2-SPINE-4384` → `_v0_1_2_SPINE_4384`
 /// - `1.0.0-rc.1` → `_v1_0_0_rc_1`
+#[must_use]
 pub fn version_to_suffix(version: &Version) -> String {
     // Always include all three version components for unambiguous reversibility
     let mut suffix = format!("_v{}_{}_{}", version.major, version.minor, version.patch);
@@ -308,6 +312,7 @@ pub fn version_to_suffix(version: &Version) -> String {
 /// let rewritten = rewrite_proto_package(contents, &version);
 /// assert!(rewritten.contains("package gm.algo.base._v0_1_2;"));
 /// ```
+#[must_use]
 pub fn rewrite_proto_package(contents: &str, version: &Version) -> String {
     let suffix = version_to_suffix(version);
 
@@ -338,7 +343,7 @@ pub fn rewrite_proto_package(contents: &str, version: &Version) -> String {
                     // Line comment - copy until newline
                     result.push(c);
                     result.push(chars.next().unwrap());
-                    while let Some(nc) = chars.next() {
+                    for nc in chars.by_ref() {
                         result.push(nc);
                         if nc == '\n' {
                             break;
@@ -364,9 +369,11 @@ pub fn rewrite_proto_package(contents: &str, version: &Version) -> String {
             if remaining == "ackage" {
                 // Verify it's a keyword boundary (not part of another word)
                 let peek_after: String = chars.clone().skip(6).take(1).collect();
-                if peek_after.chars().next().map_or(true, |ch| {
-                    ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r'
-                }) {
+                if peek_after
+                    .chars()
+                    .next()
+                    .is_none_or(|ch| ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r')
+                {
                     // Found the package keyword
                     result.push(c);
                     for _ in 0..6 {

@@ -203,7 +203,10 @@ impl Package {
         #[cfg(windows)]
         {
             use walkdir::WalkDir;
-            for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
+            for entry in WalkDir::new(path)
+                .into_iter()
+                .filter_map(std::result::Result::ok)
+            {
                 if entry.file_type().is_file() {
                     if let Ok(metadata) = std::fs::metadata(entry.path()) {
                         let mut perms = metadata.permissions();
@@ -235,7 +238,7 @@ impl Package {
             .entries()
             .into_diagnostic()
             .wrap_err(miette!("corrupted tar package"))?
-            .filter_map(|entry| entry.ok())
+            .filter_map(std::result::Result::ok)
             .find(|entry| {
                 entry
                     .path()

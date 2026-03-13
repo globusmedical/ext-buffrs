@@ -49,7 +49,7 @@ pub const GRAPH_JSON: &str = "graph.json";
 /// Namespaces metadata filename.
 pub const NAMESPACES_JSON: &str = "namespaces.json";
 
-/// CMake targets filename.
+/// `CMake` targets filename.
 pub const BUFFRS_CMAKE: &str = "buffrs.cmake";
 
 /// Serializable representation of the dependency graph.
@@ -74,6 +74,7 @@ pub struct PackageRef {
 
 impl PackageRef {
     /// Creates a new package reference.
+    #[must_use]
     pub fn new(name: &PackageName, version: &Version) -> Self {
         Self {
             name: name.to_string(),
@@ -82,6 +83,7 @@ impl PackageRef {
     }
 
     /// Returns the vendor directory name for this package reference.
+    #[must_use]
     pub fn vendor_dir(&self, version_qualified: bool) -> String {
         if version_qualified {
             format!("{}@{}", self.name, self.version)
@@ -269,7 +271,7 @@ fn build_namespaces_metadata(namespace_scan: &NamespaceScanResult) -> Namespaces
     NamespacesMetadata { namespaces }
 }
 
-/// Builds CMake content for package targets.
+/// Builds `CMake` content for package targets.
 fn build_cmake_targets(
     graph: &DependencyGraph,
     namespace_scan: &NamespaceScanResult,
@@ -313,8 +315,7 @@ fn build_cmake_targets(
             id.version()
         ));
         cmake.push_str(&format!(
-            "set(BUFFRS_PKG_{}_VENDOR_DIR \"{}\")\n",
-            safe_name, vendor_dir
+            "set(BUFFRS_PKG_{safe_name}_VENDOR_DIR \"{vendor_dir}\")\n"
         ));
 
         // Dependencies
@@ -327,7 +328,7 @@ fn build_cmake_targets(
             "set(BUFFRS_PKG_{}_DEPENDENCIES {})\n",
             safe_name,
             if deps.is_empty() {
-                "".to_string()
+                String::new()
             } else {
                 format!("\"{}\"", deps.join("\" \""))
             }
@@ -344,13 +345,13 @@ fn build_cmake_targets(
             "set(BUFFRS_PKG_{}_NAMESPACES {})\n",
             safe_name,
             if namespaces.is_empty() {
-                "".to_string()
+                String::new()
             } else {
                 format!("\"{}\"", namespaces.join("\" \""))
             }
         ));
 
-        cmake.push_str("\n");
+        cmake.push('\n');
     }
 
     // Emit root packages

@@ -37,16 +37,19 @@ pub struct ResolvedPackageId {
 
 impl ResolvedPackageId {
     /// Creates a new resolved package identifier.
+    #[must_use]
     pub fn new(name: PackageName, version: Version) -> Self {
         Self { name, version }
     }
 
     /// Returns the package name for this resolved instance.
+    #[must_use]
     pub fn name(&self) -> &PackageName {
         &self.name
     }
 
     /// Returns the resolved package version for this instance.
+    #[must_use]
     pub fn version(&self) -> &Version {
         &self.version
     }
@@ -59,6 +62,7 @@ impl ResolvedPackageId {
     /// Note: The `resolver = "multiversion"` setting only grants *permission* to
     /// have multiple versions; it doesn't force version-qualified names when
     /// there's only one version.
+    #[must_use]
     pub fn vendor_dir_name(&self, graph: &DependencyGraph) -> String {
         // Only use version-qualified names when there are actually multiple versions
         if graph.ids_for_name(&self.name).len() > 1 {
@@ -209,6 +213,7 @@ struct DownloadError {
 
 impl DependencyGraph {
     /// Creates a new dependency graph.
+    #[must_use]
     pub fn new(allow_multiple_versions: bool) -> Self {
         Self {
             allow_multiple_versions,
@@ -220,6 +225,7 @@ impl DependencyGraph {
     }
 
     /// Locates and returns a reference to a resolved dependency package by its id.
+    #[must_use]
     pub fn get(&self, id: &ResolvedPackageId) -> Option<&ResolvedDependency> {
         self.entries.get(id)
     }
@@ -230,11 +236,13 @@ impl DependencyGraph {
     }
 
     /// Returns the resolved root dependencies corresponding to the root manifest dependencies.
+    #[must_use]
     pub fn roots(&self) -> &[ResolvedPackageId] {
         &self.roots
     }
 
     /// Returns true if multi-version is globally enabled (deprecated config flag).
+    #[must_use]
     pub fn allow_multiple_versions(&self) -> bool {
         self.allow_multiple_versions
     }
@@ -242,6 +250,7 @@ impl DependencyGraph {
     /// Returns true if multi-version is permitted for a specific package name.
     ///
     /// This checks both the global config flag and per-dependency opt-in.
+    #[must_use]
     pub fn is_multiversion_permitted(&self, name: &PackageName) -> bool {
         self.allow_multiple_versions || self.multiversion_permitted.contains(name)
     }
@@ -249,6 +258,7 @@ impl DependencyGraph {
     /// Returns the effective namespace overlap policy for a package name.
     ///
     /// If multiple edges specify different policies, the most permissive wins.
+    #[must_use]
     pub fn namespace_policy(&self, name: &PackageName) -> NamespaceOverlapPolicy {
         self.namespace_policies
             .get(name)
@@ -284,7 +294,8 @@ impl DependencyGraph {
     ///
     /// A package needs rewriting if:
     /// 1. Multiple versions of this package name exist in the graph, AND
-    /// 2. The namespace_overlap policy is `Rewrite` (default)
+    /// 2. The `namespace_overlap` policy is `Rewrite` (default)
+    #[must_use]
     pub fn needs_namespace_rewrite(&self, id: &ResolvedPackageId) -> bool {
         // Check if multiple versions exist
         let versions_count = self
@@ -303,6 +314,7 @@ impl DependencyGraph {
     }
 
     /// Returns a list of vendor module directory names used by this graph.
+    #[must_use]
     pub fn vendor_module_names(&self) -> Vec<String> {
         let mut modules: Vec<String> = self
             .entries
@@ -316,6 +328,7 @@ impl DependencyGraph {
     }
 
     /// Returns all resolved ids for the given package name.
+    #[must_use]
     pub fn ids_for_name(&self, name: &PackageName) -> Vec<ResolvedPackageId> {
         self.entries
             .keys()
@@ -327,6 +340,7 @@ impl DependencyGraph {
     /// Returns the only resolved dependency for a package name.
     ///
     /// This is useful for legacy call sites that assume single-version resolution.
+    #[must_use]
     pub fn get_single_by_name(&self, name: &PackageName) -> Option<&ResolvedDependency> {
         let mut matches = self.entries.iter().filter(|(id, _)| id.name() == name);
         let first = matches.next()?;
@@ -359,6 +373,7 @@ impl<'a> DependencyGraphBuilder<'a> {
     ///
     /// # Returns
     /// A new dependency graph builder
+    #[must_use]
     pub fn new(
         manifest: &'a Manifest,
         lockfile: &'a Lockfile,
@@ -382,6 +397,7 @@ impl<'a> DependencyGraphBuilder<'a> {
     ///
     /// When set, all Artifactory registry operations will reuse this client's
     /// connection pool instead of creating new connections for each request.
+    #[must_use]
     pub fn with_client(mut self, client: reqwest::Client) -> Self {
         self.client = Some(client);
         self
@@ -412,8 +428,7 @@ impl<'a> DependencyGraphBuilder<'a> {
             .manifest
             .package
             .as_ref()
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| PackageName::unchecked("."));
+            .map_or_else(|| PackageName::unchecked("."), |p| p.name.clone());
 
         let parent_dir = env::current_dir().into_diagnostic()?;
 
@@ -604,8 +619,7 @@ impl<'a> DependencyGraphBuilder<'a> {
             .manifest
             .publish
             .as_ref()
-            .map(|p| matches!(p.resolver, ResolverMode::MultiVersion))
-            .unwrap_or(false);
+            .is_some_and(|p| matches!(p.resolver, ResolverMode::MultiVersion));
         let namespace_overlap_policy = dependency
             .manifest
             .publish
@@ -935,22 +949,22 @@ impl<'a> DependencyGraphBuilder<'a> {
                 version_req,
                 available
                     .iter()
-                    .map(|v| v.to_string())
+                    .map(std::string::ToString::to_string)
                     .collect::<Vec<_>>()
                     .join(", ")
             )
         })
     }
 
-    /// Builds the dependency graph using PubGrub SAT-based resolution.
+    /// Builds the dependency graph using `PubGrub` SAT-based resolution.
     ///
     /// This method uses a three-phase approach:
     /// 1. Discovery: Fetch all package metadata from registries (and local manifests)
-    /// 2. Resolution: Run PubGrub to find consistent versions
+    /// 2. Resolution: Run `PubGrub` to find consistent versions
     /// 3. Download: Download packages with resolved versions
     ///
     /// Note: Falls back to greedy resolution when multiversion is required,
-    /// since PubGrub inherently produces single-version solutions.
+    /// since `PubGrub` inherently produces single-version solutions.
     async fn build_with_pubgrub(self) -> miette::Result<DependencyGraph> {
         // Check if any dependency has multiversion enabled - if so, use greedy
         // PubGrub produces single-version solutions per package, but multiversion
@@ -964,8 +978,7 @@ impl<'a> DependencyGraphBuilder<'a> {
                 DependencyManifest::Local(m) => m
                     .publish
                     .as_ref()
-                    .map(|p| matches!(p.resolver, ResolverMode::MultiVersion))
-                    .unwrap_or(false),
+                    .is_some_and(|p| matches!(p.resolver, ResolverMode::MultiVersion)),
             });
 
         if has_multiversion {
@@ -979,8 +992,7 @@ impl<'a> DependencyGraphBuilder<'a> {
             .manifest
             .package
             .as_ref()
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| PackageName::unchecked("."));
+            .map_or_else(|| PackageName::unchecked("."), |p| p.name.clone());
 
         let parent_dir = env::current_dir().into_diagnostic()?;
 
@@ -1050,7 +1062,7 @@ impl<'a> DependencyGraphBuilder<'a> {
                     let store = PackageStore::open(&abs_manifest_dir).await?;
                     let mut temp_deps = DependencyGraph::new(self.config.allow_multiple_versions());
                     let package = store
-                        .release(&local_manifest, self.config, Some(&mut temp_deps), false)
+                        .release(&local_manifest, self.config, Some(&temp_deps), false)
                         .await?;
 
                     let version = package.version().clone();
@@ -1060,7 +1072,7 @@ impl<'a> DependencyGraphBuilder<'a> {
                         publish.version.clone()
                     } else {
                         // If no version specified, create exact requirement
-                        VersionReq::parse(&format!("={}", version)).unwrap()
+                        VersionReq::parse(&format!("={version}")).unwrap()
                     };
 
                     root_deps.push(PackageDependency {
@@ -1122,8 +1134,7 @@ impl<'a> DependencyGraphBuilder<'a> {
                         let sub_version_req = dep_manifest
                             .publish
                             .as_ref()
-                            .map(|p| p.version.clone())
-                            .unwrap_or(VersionReq::STAR);
+                            .map_or(VersionReq::STAR, |p| p.version.clone());
                         pkg_deps.push(PackageDependency {
                             package: dep.package.clone(),
                             version_req: sub_version_req,
@@ -1213,8 +1224,7 @@ impl<'a> DependencyGraphBuilder<'a> {
                                     let sub_version_req = dep_manifest
                                         .publish
                                         .as_ref()
-                                        .map(|p| p.version.clone())
-                                        .unwrap_or(VersionReq::STAR);
+                                        .map_or(VersionReq::STAR, |p| p.version.clone());
                                     pkg_deps.push(PackageDependency {
                                         package: dep.package.clone(),
                                         version_req: sub_version_req,
@@ -1258,7 +1268,7 @@ impl<'a> DependencyGraphBuilder<'a> {
             resolved.len(),
             resolved
                 .iter()
-                .map(|(name, version)| format!("{}@{}", name, version))
+                .map(|(name, version)| format!("{name}@{version}"))
                 .collect::<Vec<_>>()
                 .join(", ")
         );
@@ -1338,8 +1348,7 @@ impl<'a> DependencyGraphBuilder<'a> {
                     let allows_multiversion = manifest
                         .publish
                         .as_ref()
-                        .map(|p| matches!(p.resolver, ResolverMode::MultiVersion))
-                        .unwrap_or(false);
+                        .is_some_and(|p| matches!(p.resolver, ResolverMode::MultiVersion));
                     let namespace_overlap_policy = manifest
                         .publish
                         .as_ref()
@@ -1370,7 +1379,7 @@ impl<'a> DependencyGraphBuilder<'a> {
         Ok(deps)
     }
 
-    /// Recursively builds sub-dependencies using pre-resolved versions from PubGrub.
+    /// Recursively builds sub-dependencies using pre-resolved versions from `PubGrub`.
     #[async_recursion]
     async fn build_pubgrub_subdeps(
         &self,
@@ -1457,11 +1466,10 @@ impl<'a> DependencyGraphBuilder<'a> {
                         // Check if already processed
                         if let Some(existing) = deps.get_mut(&dep_id) {
                             if let ResolvedDependency::Local { dependants, .. } = existing {
-                                let allows_multiversion = manifest
-                                    .publish
-                                    .as_ref()
-                                    .map(|p| matches!(p.resolver, ResolverMode::MultiVersion))
-                                    .unwrap_or(false);
+                                let allows_multiversion =
+                                    manifest.publish.as_ref().is_some_and(|p| {
+                                        matches!(p.resolver, ResolverMode::MultiVersion)
+                                    });
                                 let namespace_overlap_policy = manifest
                                     .publish
                                     .as_ref()
@@ -1487,8 +1495,7 @@ impl<'a> DependencyGraphBuilder<'a> {
                         let allows_multiversion = manifest
                             .publish
                             .as_ref()
-                            .map(|p| matches!(p.resolver, ResolverMode::MultiVersion))
-                            .unwrap_or(false);
+                            .is_some_and(|p| matches!(p.resolver, ResolverMode::MultiVersion));
                         let namespace_overlap_policy = manifest
                             .publish
                             .as_ref()

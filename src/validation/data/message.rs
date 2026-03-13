@@ -129,8 +129,15 @@ pub enum FieldType {
 
 impl From<FieldDescriptorType> for FieldType {
     fn from(type_: FieldDescriptorType) -> Self {
-        use FieldDescriptorType::*;
-        use FieldType::*;
+        use FieldDescriptorType::{
+            TYPE_BOOL, TYPE_BYTES, TYPE_DOUBLE, TYPE_ENUM, TYPE_FIXED32, TYPE_FIXED64, TYPE_FLOAT,
+            TYPE_GROUP, TYPE_INT32, TYPE_INT64, TYPE_MESSAGE, TYPE_SFIXED32, TYPE_SFIXED64,
+            TYPE_SINT32, TYPE_SINT64, TYPE_STRING, TYPE_UINT32, TYPE_UINT64,
+        };
+        use FieldType::{
+            Bool, Bytes, Double, Enum, Fixed32, Fixed64, Float, Group, Int32, Int64, Message,
+            Sfixed32, Sfixed64, Sint32, Sint64, String, Uint32, Uint64,
+        };
         match type_ {
             TYPE_DOUBLE => Double,
             TYPE_FLOAT => Float,
@@ -171,8 +178,8 @@ pub enum FieldLabel {
 
 impl From<FieldDescriptorLabel> for FieldLabel {
     fn from(label: FieldDescriptorLabel) -> Self {
-        use FieldDescriptorLabel::*;
-        use FieldLabel::*;
+        use FieldDescriptorLabel::{LABEL_OPTIONAL, LABEL_REPEATED, LABEL_REQUIRED};
+        use FieldLabel::{Optional, Repeated, Required};
         match label {
             LABEL_OPTIONAL => Optional,
             LABEL_REQUIRED => Required,

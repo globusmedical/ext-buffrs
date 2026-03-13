@@ -36,11 +36,13 @@ pub struct RegistryUri(Url);
 
 impl RegistryUri {
     /// Get the host component of the registry URI
+    #[must_use]
     pub fn host(&self) -> Option<&str> {
         self.0.host_str()
     }
 
     /// Get the path component of the registry URI
+    #[must_use]
     pub fn path(&self) -> &str {
         self.0.path()
     }
@@ -104,7 +106,7 @@ impl RegistryRef {
         }
     }
 
-    /// Serializer for resolved RegistryUris
+    /// Serializer for resolved `RegistryUris`
     pub fn serialize_resolved<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -222,7 +224,7 @@ impl FromStr for RegistryUri {
 ///
 /// A valid registry URL must:
 /// - Have a scheme of either "http" or "https"
-/// - End with "/artifactory" if the host is a JFrog Artifactory instance
+/// - End with "/artifactory" if the host is a `JFrog` Artifactory instance
 /// - Have a host component
 ///
 /// # Arguments
@@ -288,7 +290,7 @@ fn dependency_version_string(dependency: &Dependency) -> miette::Result<String> 
         minor_version,
         patch_version,
         if version.pre.is_empty() {
-            "".to_owned()
+            String::new()
         } else {
             format!("-{}", version.pre)
         }

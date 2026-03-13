@@ -51,6 +51,7 @@ use semver::{Comparator, Op, Version, VersionReq};
 /// let req = VersionReq::parse("~1.0.0").unwrap();
 /// assert_eq!(select_version(&req, &available), Some(Version::parse("1.0.0").unwrap()));
 /// ```
+#[must_use]
 pub fn select_version(req: &VersionReq, available: &[Version]) -> Option<Version> {
     available.iter().filter(|v| req.matches(v)).max().cloned()
 }
@@ -58,6 +59,7 @@ pub fn select_version(req: &VersionReq, available: &[Version]) -> Option<Version
 /// Checks if a version requirement specifies an exact version.
 ///
 /// Returns `true` if the requirement has exactly one comparator with `Op::Exact`.
+#[must_use]
 pub fn is_exact_requirement(req: &VersionReq) -> bool {
     req.comparators.len() == 1 && req.comparators.first().is_some_and(|c| c.op == Op::Exact)
 }
@@ -65,6 +67,7 @@ pub fn is_exact_requirement(req: &VersionReq) -> bool {
 /// Extracts the exact version from a requirement that specifies one.
 ///
 /// Returns `None` if the requirement is not exact or is malformed.
+#[must_use]
 pub fn extract_exact_version(req: &VersionReq) -> Option<Version> {
     if !is_exact_requirement(req) {
         return None;
@@ -81,6 +84,7 @@ pub fn extract_exact_version(req: &VersionReq) -> Option<Version> {
 }
 
 /// Creates an exact version requirement from a version.
+#[must_use]
 pub fn to_exact_requirement(version: &Version) -> VersionReq {
     VersionReq {
         comparators: vec![Comparator {
@@ -96,6 +100,7 @@ pub fn to_exact_requirement(version: &Version) -> VersionReq {
 /// Converts a version to its artifact path string representation.
 ///
 /// This is used when constructing download URLs for packages.
+#[must_use]
 pub fn version_to_artifact_string(version: &Version) -> String {
     if version.pre.is_empty() {
         format!("{}.{}.{}", version.major, version.minor, version.patch)

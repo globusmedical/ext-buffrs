@@ -39,6 +39,7 @@ pub struct Validator {
 
 impl Validator {
     /// Create new parser with a given root path.
+    #[must_use]
     pub fn new(root: &Path, manifest: &PackageManifest) -> Self {
         Self {
             parser: Parser::new(root),

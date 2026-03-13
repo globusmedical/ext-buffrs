@@ -154,7 +154,7 @@ pub fn generate_buf_yaml_file(
 }
 
 /// Default buf.yaml file
-const DEFAULT_YAML: &str = r#"
+const DEFAULT_YAML: &str = r"
 version: v2
 
 modules:
@@ -169,7 +169,7 @@ breaking:
 deps:
   - buf.build/googleapis/googleapis
   - buf.build/grpc/grpc
-"#;
+";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Config {
