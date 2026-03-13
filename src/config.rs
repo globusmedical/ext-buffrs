@@ -74,8 +74,8 @@ pub struct Config {
 struct ResolverConfig {
     allow_multiple_versions: bool,
     skip_link_safety_check: bool,
-    /// Use legacy greedy resolution instead of PubGrub SAT-based resolution.
-    /// Only use this if you encounter issues with PubGrub.
+    /// Use legacy greedy resolution instead of `PubGrub` SAT-based resolution.
+    /// Only use this if you encounter issues with `PubGrub`.
     use_greedy_resolver: bool,
 }
 
@@ -105,6 +105,7 @@ impl Config {
     /// Whether dependency resolution may install multiple versions of the same package name.
     ///
     /// This is opt-in because it can change vendor layout and lockfile behavior.
+    #[must_use]
     pub fn allow_multiple_versions(&self) -> bool {
         self.resolver.allow_multiple_versions
     }
@@ -113,17 +114,19 @@ impl Config {
     ///
     /// WARNING: This is unsafe and should ONLY be used for testing or when you know
     /// that the proto namespaces don't actually conflict at runtime.
+    #[must_use]
     pub fn skip_link_safety_check(&self) -> bool {
         self.resolver.skip_link_safety_check
     }
 
-    /// Use legacy greedy resolution instead of PubGrub.
+    /// Use legacy greedy resolution instead of `PubGrub`.
     ///
     /// When enabled, the resolver uses simple greedy version selection
     /// instead of SAT-based resolution. This may fail on diamond dependencies.
     ///
     /// This is provided for backward compatibility and debugging. The default
-    /// PubGrub resolver should be preferred for most use cases.
+    /// `PubGrub` resolver should be preferred for most use cases.
+    #[must_use]
     pub fn use_greedy_resolver(&self) -> bool {
         self.resolver.use_greedy_resolver
     }
@@ -175,6 +178,7 @@ impl Config {
     ///
     /// # Returns
     /// A vector of default arguments for the specified command
+    #[must_use]
     pub fn get_default_args(&self, command: Option<&str>) -> Vec<String> {
         self.command_defaults
             .get(command.unwrap_or(DEFAULT_ARGS_KEY))
@@ -189,6 +193,7 @@ impl Config {
     ///
     /// # Returns
     /// Some(PathBuf) if the configuration file is found, None otherwise
+    #[must_use]
     pub fn locate_config(cwd: Option<&Path>) -> Option<PathBuf> {
         if let Some(cwd) = cwd {
             let mut current_dir = cwd.to_owned();
@@ -304,19 +309,19 @@ impl Config {
         let allow_multiple_versions = config
             .get("resolver")
             .and_then(|resolver| resolver.get("allow_multiple_versions"))
-            .and_then(|value| value.as_bool())
+            .and_then(toml::Value::as_bool)
             .unwrap_or(false);
 
         let skip_link_safety_check = config
             .get("resolver")
             .and_then(|resolver| resolver.get("skip_link_safety_check"))
-            .and_then(|value| value.as_bool())
+            .and_then(toml::Value::as_bool)
             .unwrap_or(false);
 
         let use_greedy_resolver = config
             .get("resolver")
             .and_then(|resolver| resolver.get("use_greedy_resolver"))
-            .and_then(|value| value.as_bool())
+            .and_then(toml::Value::as_bool)
             .unwrap_or(false);
 
         ResolverConfig {
@@ -351,7 +356,7 @@ impl Config {
             .get("registry")
             .and_then(|registry| registry.get("default"))
             .and_then(|default| default.as_str())
-            .map(|default| default.to_string());
+            .map(std::string::ToString::to_string);
         if let Some(ref default_registry) = default_registry {
             ensure!(
                 registries.contains_key(default_registry),
@@ -415,11 +420,13 @@ impl Config {
                             .and_then(|args| args.as_array())
                             .map(|args| {
                                 args.iter()
-                                    .filter_map(|arg| arg.as_str().map(|s| s.to_string()))
+                                    .filter_map(|arg| {
+                                        arg.as_str().map(std::string::ToString::to_string)
+                                    })
                                     .collect::<Vec<String>>()
                             })
                             .unwrap_or_default();
-                        Ok((command.to_string(), default_args))
+                        Ok((command.clone(), default_args))
                     })
                     .collect::<miette::Result<HashMap<String, Vec<String>>>>()
             })
@@ -437,7 +444,7 @@ impl Config {
         {
             let global_defaults = global_args
                 .iter()
-                .filter_map(|arg| arg.as_str().map(|s| s.to_string()))
+                .filter_map(|arg| arg.as_str().map(std::string::ToString::to_string))
                 .collect::<Vec<String>>();
             command_defaults.insert(DEFAULT_ARGS_KEY.to_string(), global_defaults);
         }

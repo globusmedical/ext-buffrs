@@ -171,6 +171,17 @@ enum Command {
         #[command(subcommand)]
         command: LockfileCommand,
     },
+
+    /// Update buffrs to the latest version
+    #[command(name = "self-update")]
+    SelfUpdate {
+        /// Force update even if already on latest version
+        #[arg(long)]
+        force: bool,
+        /// Only check for updates without installing
+        #[arg(long)]
+        check_only: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -250,17 +261,15 @@ async fn run(args: &[String]) -> miette::Result<()> {
         Command::Init { lib, api, package } => {
             let kind = infer_package_type(lib, api);
 
-            command::init(kind, package.to_owned())
-                .await
-                .wrap_err(miette!(
-                    "failed to initialize {}",
-                    package.map(|p| format!("`{p}`")).unwrap_or_default()
-                ))
+            command::init(kind, package.clone()).await.wrap_err(miette!(
+                "failed to initialize {}",
+                package.map(|p| format!("`{p}`")).unwrap_or_default()
+            ))
         }
         Command::New { lib, api, package } => {
             let kind = infer_package_type(lib, api);
 
-            command::new(kind, package.to_owned())
+            command::new(kind, package.clone())
                 .await
                 .wrap_err(miette!("failed to initialize {}", format!("`{package}`")))
         }
@@ -288,7 +297,7 @@ async fn run(args: &[String]) -> miette::Result<()> {
                 ))
         }
         Command::Remove { package } => {
-            command::remove(package.to_owned(), &config)
+            command::remove(package.clone(), &config)
                 .await
                 .wrap_err(miette!(
                     "failed to remove `{package}` from `{MANIFEST_FILE}`"
@@ -313,7 +322,7 @@ async fn run(args: &[String]) -> miette::Result<()> {
             let registry = config.parse_registry_arg(&registry)?;
             command::publish(
                 &registry,
-                repository.to_owned(),
+                repository.clone(),
                 allow_dirty,
                 dry_run,
                 set_version,
@@ -359,6 +368,13 @@ async fn run(args: &[String]) -> miette::Result<()> {
                 "failed to print locked file requirements of `{package}`"
             )),
         },
+        Command::SelfUpdate { force, check_only } => {
+            if check_only {
+                buffrs::update::check().await
+            } else {
+                buffrs::update::update(force).await
+            }
+        }
     }
 }
 
@@ -380,6 +396,7 @@ fn infer_package_type(lib: bool, api: bool) -> Option<PackageType> {
 ///
 /// # Returns
 /// A vector of arguments with default arguments merged in
+#[must_use]
 pub fn merge_args_with_defaults(config: &Config, args: &[String]) -> Vec<String> {
     // Check if --ignore-defaults is in the arguments
     let initial_cli = Cli::try_parse_from(args);
@@ -405,7 +422,7 @@ pub fn merge_args_with_defaults(config: &Config, args: &[String]) -> Vec<String>
                 .into_iter()
                 .filter(|arg| !user_args.contains(arg))
                 .collect();
-            args.splice(position + 1..position + 1, filtered_defaults);
+            args.splice((position + 1)..=position, filtered_defaults);
         }
     }
 

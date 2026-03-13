@@ -38,7 +38,7 @@ pub enum CertValidationPolicy {
 /// Environment variable for specifying a custom CA bundle file
 pub const ENV_CA_BUNDLE: &str = "BUFFRS_CA_BUNDLE";
 
-/// Builds a configured reqwest::Client for Artifactory operations.
+/// Builds a configured `reqwest::Client` for Artifactory operations.
 ///
 /// This helper ensures consistent TLS and redirect configuration across all
 /// Artifactory clients. Use this when creating a shared client to be passed
@@ -117,7 +117,7 @@ impl Artifactory {
         Self::new_with_client(registry, credentials, client)
     }
 
-    /// Creates a new instance with a pre-built reqwest::Client.
+    /// Creates a new instance with a pre-built `reqwest::Client`.
     ///
     /// Use this when you want to share a connection pool across multiple
     /// Artifactory clients within the same invocation.
@@ -125,7 +125,7 @@ impl Artifactory {
     /// # Arguments
     /// * `registry` - The registry URI
     /// * `credentials` - The credentials to use for the registry
-    /// * `client` - A pre-configured reqwest::Client (use `build_reqwest_client`)
+    /// * `client` - A pre-configured `reqwest::Client` (use `build_reqwest_client`)
     pub fn new_with_client(
         registry: RegistryUri,
         credentials: &Credentials,
@@ -152,7 +152,7 @@ impl Artifactory {
     /// Pings artifactory to ensure registry access is working
     pub async fn ping(&self) -> miette::Result<()> {
         let repositories_url: Url = {
-            let mut uri: url::Url = self.registry.to_owned().into();
+            let mut uri: url::Url = self.registry.clone().into();
             let path = &format!("{}/api/repositories", uri.path());
             uri.set_path(path);
             uri
@@ -174,7 +174,7 @@ impl Artifactory {
     ) -> miette::Result<Vec<Version>> {
         // Retrieve all packages matching the given name
         let search_query_url: Url = {
-            let mut uri: url::Url = self.registry.to_owned().into();
+            let mut uri: url::Url = self.registry.clone().into();
             uri.set_path("artifactory/api/search/artifact");
             uri.set_query(Some(&format!("name={name}&repos={repository}")));
             uri
@@ -285,8 +285,7 @@ impl Artifactory {
             let path = url.path();
 
             url.set_path(&format!(
-                "{}/{}/{}/{}-{}.tgz",
-                path, repository, name, name, version_str
+                "{path}/{repository}/{name}/{name}-{version_str}.tgz"
             ));
 
             url

@@ -36,7 +36,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::package::PackageName;
 
-/// A package identifier for PubGrub resolution.
+/// A package identifier for `PubGrub` resolution.
 ///
 /// Wraps `PackageName` with a special "root" variant for the resolution root.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -51,7 +51,7 @@ impl fmt::Display for PubGrubPackage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Root => write!(f, "root"),
-            Self::Package(name) => write!(f, "{}", name),
+            Self::Package(name) => write!(f, "{name}"),
         }
     }
 }
@@ -62,12 +62,13 @@ impl From<PackageName> for PubGrubPackage {
     }
 }
 
-/// Version set type for PubGrub using semver::Version.
+/// Version set type for `PubGrub` using `semver::Version`.
 pub type SemverRanges = Ranges<Version>;
 
-/// Converts a semver::VersionReq to PubGrub Ranges.
+/// Converts a `semver::VersionReq` to `PubGrub` Ranges.
 ///
 /// This handles all semver operators: `=`, `^`, `~`, `>`, `>=`, `<`, `<=`, `*`
+#[must_use]
 pub fn version_req_to_ranges(req: &VersionReq) -> SemverRanges {
     if req.comparators.is_empty() {
         // Empty requirement matches everything (equivalent to `*`)
@@ -85,7 +86,7 @@ pub fn version_req_to_ranges(req: &VersionReq) -> SemverRanges {
     result
 }
 
-/// Converts a single semver Comparator to PubGrub Ranges.
+/// Converts a single semver Comparator to `PubGrub` Ranges.
 fn comparator_to_ranges(comp: &Comparator) -> SemverRanges {
     let major = comp.major;
     let minor = comp.minor;
@@ -190,19 +191,16 @@ fn caret_range(
 
 /// Implements wildcard (*) version ranges.
 fn wildcard_range(major: u64, minor: Option<u64>) -> SemverRanges {
-    match minor {
-        Some(m) => {
-            // X.Y.* matches [X.Y.0, X.(Y+1).0)
-            let min = Version::new(major, m, 0);
-            let max = Version::new(major, m + 1, 0);
-            range_between(&min, &max)
-        }
-        None => {
-            // X.* matches [X.0.0, (X+1).0.0)
-            let min = Version::new(major, 0, 0);
-            let max = Version::new(major + 1, 0, 0);
-            range_between(&min, &max)
-        }
+    if let Some(m) = minor {
+        // X.Y.* matches [X.Y.0, X.(Y+1).0)
+        let min = Version::new(major, m, 0);
+        let max = Version::new(major, m + 1, 0);
+        range_between(&min, &max)
+    } else {
+        // X.* matches [X.0.0, (X+1).0.0)
+        let min = Version::new(major, 0, 0);
+        let max = Version::new(major + 1, 0, 0);
+        range_between(&min, &max)
     }
 }
 
@@ -227,7 +225,7 @@ pub struct PackageInfo {
 /// A dependency provider that uses pre-fetched package data.
 ///
 /// This provider is populated by querying the registry for all packages
-/// before running the PubGrub resolution.
+/// before running the `PubGrub` resolution.
 pub struct BuffrsDependencyProvider {
     /// Package data cache
     packages: Arc<RwLock<HashMap<PackageName, PackageInfo>>>,
@@ -242,6 +240,7 @@ pub struct BuffrsDependencyProvider {
 
 impl BuffrsDependencyProvider {
     /// Creates a new dependency provider with the given root dependencies.
+    #[must_use]
     pub fn new(root_deps: Vec<PackageDependency>) -> Self {
         Self {
             packages: Arc::new(RwLock::new(HashMap::new())),
@@ -265,6 +264,7 @@ impl BuffrsDependencyProvider {
     }
 
     /// Gets the available versions for a package.
+    #[must_use]
     pub fn get_versions(&self, name: &PackageName) -> Option<Vec<Version>> {
         let packages = self.packages.read().unwrap();
         packages.get(name).map(|info| info.versions.clone())
@@ -388,8 +388,7 @@ impl DependencyProvider for BuffrsDependencyProvider {
                     }
                 } else {
                     Ok(Dependencies::Unavailable(format!(
-                        "package {} not found in registry",
-                        name
+                        "package {name} not found in registry"
                     )))
                 }
             }
@@ -397,7 +396,7 @@ impl DependencyProvider for BuffrsDependencyProvider {
     }
 }
 
-/// Result of PubGrub resolution.
+/// Result of `PubGrub` resolution.
 pub type ResolutionResult = Result<HashMap<PackageName, Version>, ResolutionError>;
 
 /// Error returned when resolution fails.
@@ -415,7 +414,7 @@ impl fmt::Display for ResolutionError {
 
 impl std::error::Error for ResolutionError {}
 
-/// Runs PubGrub resolution with the given dependency provider.
+/// Runs `PubGrub` resolution with the given dependency provider.
 ///
 /// Returns a map of package names to resolved versions.
 pub fn resolve(provider: &BuffrsDependencyProvider) -> ResolutionResult {
@@ -438,7 +437,7 @@ pub fn resolve(provider: &BuffrsDependencyProvider) -> ResolutionResult {
             Err(ResolutionError { message: report })
         }
         Err(err) => Err(ResolutionError {
-            message: format!("{:?}", err),
+            message: format!("{err:?}"),
         }),
     }
 }

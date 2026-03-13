@@ -49,6 +49,8 @@ pub mod pubgrub_resolver;
 pub mod registry;
 /// Resolve package dependencies.
 pub mod resolver;
+/// Self-update command.
+pub mod update;
 /// Validation for buffrs packages.
 #[cfg(feature = "validation")]
 pub mod validation;

@@ -84,7 +84,7 @@ impl LockedPackage {
             name: package.name().to_owned(),
             registry,
             repository,
-            digest: package.digest(DigestAlgorithm::SHA256).to_owned(),
+            digest: package.digest(DigestAlgorithm::SHA256).clone(),
             version: package.version().to_owned(),
             dependencies: package
                 .manifest
@@ -98,12 +98,13 @@ impl LockedPackage {
     }
 
     /// Attach resolved dependency versions (optional).
+    #[must_use]
     pub fn with_resolved_dependencies(mut self, dependencies: Vec<LockedDependency>) -> Self {
         self.dependencies_resolved = dependencies;
         self
     }
 
-    /// Validates if another LockedPackage matches this one
+    /// Validates if another `LockedPackage` matches this one
     pub fn validate(&self, package: &Package) -> miette::Result<()> {
         let digest: Digest = DigestAlgorithm::SHA256.digest(&package.tgz);
 
@@ -169,6 +170,7 @@ pub struct LockfileMultiversionState {
 
 impl LockfileMultiversionState {
     /// Returns true if any package has multiple versions.
+    #[must_use]
     pub fn has_multiversion(&self) -> bool {
         !self.multiversion_packages.is_empty()
     }
@@ -262,6 +264,7 @@ impl Lockfile {
     }
 
     /// Locates a given package in the Lockfile
+    #[must_use]
     pub fn get(&self, name: &PackageName) -> Option<&LockedPackage> {
         self.packages.iter().find(|p| &p.name == name)
     }
@@ -269,6 +272,7 @@ impl Lockfile {
     /// Computes the multiversion state of this lockfile.
     ///
     /// Returns information about which packages have multiple versions locked.
+    #[must_use]
     pub fn multiversion_state(&self) -> LockfileMultiversionState {
         use std::collections::HashMap;
         let mut version_counts: HashMap<&PackageName, usize> = HashMap::new();
@@ -287,6 +291,7 @@ impl Lockfile {
     /// Locates a given package in the lockfile by name and version requirement.
     ///
     /// This is required when multiple versions of the same package name are present.
+    #[must_use]
     pub fn find(
         &self,
         name: &PackageName,
@@ -339,7 +344,7 @@ impl File for Lockfile {
                 let raw: RawLockfile = toml::from_str(&contents)
                     .into_diagnostic()
                     .wrap_err(DeserializationError(ManagedFile::Lock))?;
-                Ok(Self::from_iter(raw.packages.into_iter()))
+                Ok(Self::from_iter(raw.packages))
             }
             Err(err) if matches!(err.kind(), std::io::ErrorKind::NotFound) => {
                 Err(FileNotFound(path_str).into())
@@ -379,6 +384,7 @@ pub struct FileRequirement {
 
 impl FileRequirement {
     /// URL where the file can be located.
+    #[must_use]
     pub fn url(&self) -> &Url {
         &self.url
     }

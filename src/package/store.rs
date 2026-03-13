@@ -67,11 +67,13 @@ impl PackageStore {
     }
 
     /// Path to the `proto` directory.
+    #[must_use]
     pub fn proto_path(&self) -> PathBuf {
         self.root.join(Self::PROTO_PATH)
     }
 
     /// Path to the vendor directory.
+    #[must_use]
     pub fn proto_vendor_path(&self) -> PathBuf {
         self.root.join(Self::PROTO_VENDOR_PATH)
     }
@@ -149,6 +151,7 @@ impl PackageStore {
     }
 
     /// Directory for the vendored installation of a resolved package instance.
+    #[must_use]
     pub fn locate_resolved(&self, id: &ResolvedPackageId, graph: &DependencyGraph) -> PathBuf {
         self.proto_vendor_path().join(id.vendor_dir_name(graph))
     }
@@ -220,7 +223,7 @@ impl PackageStore {
         deps: Option<&DependencyGraph>,
         preserve_mtime: bool,
     ) -> miette::Result<Package> {
-        for dependency in manifest.dependencies.iter() {
+        for dependency in &manifest.dependencies {
             let resolved = if let Some(deps) = deps {
                 deps.get_single_by_name(&dependency.package)
                     .map(|dep| dep.package().manifest.clone())
@@ -273,6 +276,7 @@ impl PackageStore {
     }
 
     /// Directory for the vendored installation of a package
+    #[must_use]
     pub fn locate(&self, package: &PackageName) -> PathBuf {
         self.proto_vendor_path().join(&**package)
     }
@@ -282,7 +286,7 @@ impl PackageStore {
         let mut paths: Vec<_> = WalkDir::new(path)
             .into_iter()
             .filter_map(Result::ok)
-            .map(|entry| entry.into_path())
+            .map(walkdir::DirEntry::into_path)
             .filter(|path| {
                 if vendored {
                     true

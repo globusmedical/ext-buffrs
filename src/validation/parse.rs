@@ -54,7 +54,7 @@ impl Parser {
             .file
             .iter()
             .try_fold(Packages::default(), |mut packages, item| {
-                packages.add(item).map(|_| packages)
+                packages.add(item).map(|()| packages)
             })?;
 
         Ok(packages)

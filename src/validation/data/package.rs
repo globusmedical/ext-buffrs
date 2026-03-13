@@ -80,7 +80,7 @@ impl Package {
     pub fn add(&mut self, descriptor: &FileDescriptorProto) -> Result<(), PackageError> {
         if descriptor.package() != self.name {
             return Err(PackageError::WrongPackage {
-                expected: self.name.to_owned(),
+                expected: self.name.clone(),
                 got: descriptor.package().to_owned(),
             });
         }

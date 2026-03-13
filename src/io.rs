@@ -62,7 +62,7 @@ pub trait File: Sized + Send + Sync + 'static {
         P: AsRef<Path> + Send + Sync;
 
     /// Loads the file from the current directory, if it exists, otherwise returns an empty one.
-    /// Fails if the exists() check fails.
+    /// Fails if the `exists()` check fails.
     async fn load_or_default() -> miette::Result<Self>
     where
         Self: Default,
@@ -75,7 +75,7 @@ pub trait File: Sized + Send + Sync + 'static {
     }
 
     /// Loads the file from a specific path, if it exists, otherwise returns an empty one.
-    /// Fails if the exists() check fails.
+    /// Fails if the `exists()` check fails.
     async fn load_from_or_default<P>(path: P) -> miette::Result<Self>
     where
         Self: Default,

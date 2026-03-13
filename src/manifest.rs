@@ -63,6 +63,7 @@ pub enum Edition {
 
 impl Edition {
     /// The current / latest edition of buffrs
+    #[must_use]
     pub fn latest() -> Self {
         Self::Canary
     }
@@ -290,6 +291,7 @@ pub struct ResolvedManifest(pub Manifest);
 
 impl Manifest {
     /// Create a new manifest of the current edition
+    #[must_use]
     pub fn new(package: Option<PackageManifest>, dependencies: Vec<Dependency>) -> Self {
         Self {
             edition: Edition::latest(),
@@ -458,8 +460,7 @@ impl Manifest {
                     self.package
                         .as_ref()
                         .map(|p| p.name.clone())
-                        .map(|n| n.to_string())
-                        .unwrap_or("package".to_string())
+                        .map_or("package".to_string(), |n| n.to_string())
                 ));
             }
         }
@@ -487,8 +488,7 @@ impl ResolvedManifest {
                             manifest.package
                                 .as_ref()
                                 .map(|p| p.name.clone())
-                                .map(|n| n.to_string())
-                                .unwrap_or("package".to_string())
+                                .map_or("package".to_string(), |n| n.to_string())
                         ));
                     }
                 }
@@ -588,6 +588,7 @@ pub struct Dependency {
 
 impl Dependency {
     /// Creates a new dependency
+    #[must_use]
     pub fn new(
         registry: &RegistryRef,
         repository: String,
@@ -610,6 +611,7 @@ impl Dependency {
     }
 
     /// Creates a copy of this dependency with a pinned version
+    #[must_use]
     pub fn with_version(&self, version: &Version) -> Dependency {
         let mut dependency = self.clone();
 
@@ -629,6 +631,7 @@ impl Dependency {
     }
 
     /// Returns the resolver mode for this dependency edge.
+    #[must_use]
     pub fn resolver_mode(&self) -> ResolverMode {
         match &self.manifest {
             DependencyManifest::Remote(m) => m.resolver,
@@ -639,6 +642,7 @@ impl Dependency {
     }
 
     /// Returns the namespace overlap policy for this dependency edge.
+    #[must_use]
     pub fn namespace_overlap_policy(&self) -> NamespaceOverlapPolicy {
         match &self.manifest {
             DependencyManifest::Remote(m) => m.namespace_overlap,
@@ -651,6 +655,7 @@ impl Dependency {
     }
 
     /// Returns true if this dependency allows multiple versions.
+    #[must_use]
     pub fn allows_multiversion(&self) -> bool {
         matches!(self.resolver_mode(), ResolverMode::MultiVersion)
     }
