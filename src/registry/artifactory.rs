@@ -166,79 +166,66 @@ impl Artifactory {
 
     /// Retrieves all available versions of a package from artifactory.
     ///
-    /// Returns a list of all valid semver versions found for the package.
+    /// Uses the Storage API (`/api/storage/{repo}/{name}/`) which supports
+    /// both local and virtual repositories, unlike the Artifact Search API.
     pub async fn list_versions(
         &self,
         repository: String,
         name: PackageName,
     ) -> miette::Result<Vec<Version>> {
-        // Retrieve all packages matching the given name
-        let search_query_url: Url = {
+        let storage_url: Url = {
             let mut uri: url::Url = self.registry.clone().into();
-            uri.set_path("artifactory/api/search/artifact");
-            uri.set_query(Some(&format!("name={name}&repos={repository}")));
+            let base = uri.path().trim_end_matches('/');
+            uri.set_path(&format!("{base}/api/storage/{repository}/{name}/"));
             uri
         };
 
+        tracing::debug!("Listing versions via storage API: {storage_url}");
+
         let response = self
-            .new_request(Method::GET, search_query_url)
+            .new_request(Method::GET, storage_url.clone())
             .send()
             .await?;
         let response: reqwest::Response = response.0;
 
-        let headers = response.headers();
-        let content_type = headers
-            .get(&reqwest::header::CONTENT_TYPE)
-            .ok_or_else(|| miette!("missing content-type header"))?;
-        ensure!(
-            content_type
-                == reqwest::header::HeaderValue::from_static(
-                    "application/vnd.org.jfrog.artifactory.search.ArtifactSearchResult+json"
-                ),
-            "server response has incorrect mime type: {content_type:?}"
-        );
+        // A 404 means the package folder doesn't exist yet — return empty
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            tracing::debug!("Package folder not found at {storage_url}, returning empty versions");
+            return Ok(Vec::new());
+        }
 
         let response_str = response.text().await.into_diagnostic().wrap_err(miette!(
             "unexpected error: unable to retrieve response payload"
         ))?;
-        let parsed_response = serde_json::from_str::<ArtifactSearchResponse>(&response_str)
+        let parsed_response = serde_json::from_str::<StorageFolderInfo>(&response_str)
             .into_diagnostic()
             .wrap_err(miette!(
-                "unexpected error: response could not be deserialized to ArtifactSearchResponse"
+                "unexpected error: response could not be deserialized to StorageFolderInfo"
             ))?;
 
         tracing::debug!(
-            "List of artifacts found matching the name: {:?}",
-            parsed_response
+            "Storage folder listing for {}/{}: {} children",
+            repository,
+            name,
+            parsed_response.children.len()
         );
 
-        // Extract all valid versions from the artifact URIs
+        let name_str = name.to_string();
         let versions: Vec<Version> = parsed_response
-            .results
+            .children
             .iter()
-            .filter_map(|artifact_search_result| {
-                let uri = artifact_search_result.to_owned().uri;
-                let full_artifact_name = uri
-                    .split('/')
-                    .next_back()
-                    .map(|name_tgz| name_tgz.trim_end_matches(".tgz"));
-                let artifact_version = full_artifact_name.and_then(|artifact_name| {
-                    // Extract version by removing the package name prefix
-                    // Format: {name}-{version}.tgz
-                    let name_str = name.to_string();
-                    artifact_name
-                        .strip_prefix(&name_str)
-                        .and_then(|rest| rest.strip_prefix('-'))
-                        .and_then(|version_str| Version::parse(version_str).ok())
-                });
-
-                // Double-check that the artifact name matches exactly
-                let expected_artifact_name =
-                    artifact_version.clone().map(|av| format!("{name}-{av}"));
-                if full_artifact_name.is_some_and(|actual| {
-                    expected_artifact_name.is_some_and(|expected| expected == actual)
-                }) {
-                    artifact_version
+            .filter(|child| !child.folder)
+            .filter_map(|child| {
+                let filename = child.uri.trim_start_matches('/');
+                let artifact_name = filename.strip_suffix(".tgz")?;
+                let version_str = artifact_name
+                    .strip_prefix(&name_str)
+                    .and_then(|rest| rest.strip_prefix('-'))?;
+                let version = Version::parse(version_str).ok()?;
+                // Round-trip check: ensure the parsed version reconstructs the filename
+                let expected = format!("{name}-{version}");
+                if expected == artifact_name {
+                    Some(version)
                 } else {
                     None
                 }
@@ -494,11 +481,12 @@ impl TryFrom<Response> for ValidatedResponse {
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
-struct ArtifactSearchResponse {
-    results: Vec<ArtifactSearchResult>,
+struct StorageFolderInfo {
+    children: Vec<StorageChild>,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
-struct ArtifactSearchResult {
+struct StorageChild {
     uri: String,
+    folder: bool,
 }

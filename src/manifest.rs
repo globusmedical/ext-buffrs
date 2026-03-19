@@ -103,6 +103,7 @@ impl From<Edition> for &'static str {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RawManifest {
     Canary {
+        edition: Edition,
         package: Option<PackageManifest>,
         dependencies: DependencyMap,
     },
@@ -129,7 +130,7 @@ impl RawManifest {
 
     fn edition(&self) -> Edition {
         match self {
-            Self::Canary { .. } => Edition::Canary,
+            Self::Canary { edition, .. } => edition.clone(),
             Self::Unknown { .. } => Edition::Unknown,
         }
     }
@@ -146,11 +147,13 @@ mod serializer {
         {
             match *self {
                 RawManifest::Canary {
+                    ref edition,
                     ref package,
                     ref dependencies,
                 } => {
+                    let edition_str: &str = edition.clone().into();
                     let mut s = serializer.serialize_struct("Canary", 3)?;
-                    s.serialize_field("edition", CANARY_EDITION)?;
+                    s.serialize_field("edition", edition_str)?;
                     s.serialize_field("package", package)?;
                     s.serialize_field("dependencies", dependencies)?;
                     s.end()
@@ -221,13 +224,15 @@ mod deserializer {
                         });
                     };
 
-                    match Edition::from(edition.as_str()) {
+                    let parsed_edition = Edition::from(edition.as_str());
+                    match parsed_edition {
                         Edition::Canary | Edition::Canary10 | Edition::Canary09 | Edition::Canary08 | Edition::Canary07 => Ok(RawManifest::Canary {
+                            edition: parsed_edition,
                             package,
                             dependencies,
                         }),
                         Edition::Unknown => Err(de::Error::custom(
-                            format!("unsupported manifest edition, supported editions of {} are: {CANARY_EDITION}", env!("CARGO_PKG_VERSION"))
+                            format!("unsupported manifest edition '{}', supported editions of buffrs {} are: {CANARY_EDITION}, 0.10, 0.9, 0.8, 0.7", edition, env!("CARGO_PKG_VERSION"))
                         )),
                     }
                 }
@@ -252,6 +257,7 @@ impl From<Manifest> for RawManifest {
             | Edition::Canary09
             | Edition::Canary08
             | Edition::Canary07 => RawManifest::Canary {
+                edition: manifest.edition,
                 package: manifest.package,
                 dependencies,
             },
@@ -924,6 +930,35 @@ lib-algo-base = { version = "=0.1.3-SPINE-4384", repository = "grpc" }
                 );
             }
             other => panic!("expected Remote dependency, got {:?}", other),
+        }
+    }
+
+    /// Regression test: edition must survive a parse → serialize round-trip.
+    ///
+    /// Before the fix, `RawManifest::Canary` did not store the parsed edition
+    /// and the serializer hardcoded `CANARY_EDITION` ("0.50"), so any manifest
+    /// with `edition = "0.10"` would be rewritten to `edition = "0.50"`.
+    #[test]
+    fn edition_preserved_on_roundtrip() {
+        for edition in &["0.10", "0.9", "0.8", "0.7", "0.50"] {
+            let input = format!(
+                r#"edition = "{edition}"
+
+[package]
+type = "lib"
+name = "test-pkg"
+version = "1.0.0"
+"#
+            );
+            let manifest = Manifest::try_parse(&input, None)
+                .unwrap_or_else(|e| panic!("should parse edition {edition}: {e}"));
+            let output: String = manifest
+                .try_into()
+                .unwrap_or_else(|e| panic!("should serialize edition {edition}: {e}"));
+            assert!(
+                output.contains(&format!(r#"edition = "{edition}""#)),
+                "Edition {edition} was mutated during round-trip! Output:\n{output}"
+            );
         }
     }
 }
