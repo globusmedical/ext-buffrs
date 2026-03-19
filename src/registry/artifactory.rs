@@ -184,14 +184,26 @@ impl Artifactory {
 
         let response = self
             .new_request(Method::GET, storage_url.clone())
-            .send()
+            .send_raw()
             .await?;
-        let response: reqwest::Response = response.0;
 
         // A 404 means the package folder doesn't exist yet — return empty
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             tracing::debug!("Package folder not found at {storage_url}, returning empty versions");
             return Ok(Vec::new());
+        }
+
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(miette!(
+                "unauthorized - please provide registry credentials with `buffrs login`"
+            ));
+        }
+
+        if !response.status().is_success() {
+            return Err(miette!(
+                "unexpected status {} from storage API at {storage_url}",
+                response.status()
+            ));
         }
 
         let response_str = response.text().await.into_diagnostic().wrap_err(miette!(
