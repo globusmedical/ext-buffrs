@@ -194,8 +194,20 @@ impl FromStr for RegistryRef {
         // Attempt to parse the value as a URL
         match RegistryUri::from_str(value) {
             Ok(uri) => Ok(Self::Url(uri)),
-            // If the value is not a valid URL, treat it as an alias
-            Err(_) => Ok(Self::Alias(value.to_owned())),
+            Err(_) => {
+                // Handle legacy "alias (url)" format from older buffrs versions
+                // (before v0.10.1) that incorrectly serialized ResolvedAlias
+                // using its Display format instead of just the URL.
+                if let Some(resolved) = parse_legacy_resolved_alias(value) {
+                    tracing::warn!(
+                        "recovered corrupted registry reference \"{value}\" \
+                         (legacy \"alias (url)\" format)"
+                    );
+                    return Ok(resolved);
+                }
+
+                Ok(Self::Alias(value.to_owned()))
+            }
         }
     }
 }
@@ -218,6 +230,35 @@ impl FromStr for RegistryUri {
 
         Ok(Self(url))
     }
+}
+
+/// Attempt to parse a legacy `"alias (url)"` string produced by buffrs
+/// versions before v0.10.1, which incorrectly serialized `ResolvedAlias`
+/// using its `Display` implementation instead of just the URL.
+///
+/// Returns `Some(ResolvedAlias { alias, url })` when the pattern matches
+/// and the extracted URL is valid, `None` otherwise.
+fn parse_legacy_resolved_alias(value: &str) -> Option<RegistryRef> {
+    // Pattern: "alias_name (https://...)"
+    let open = value.find(" (")?;
+    let alias = &value[..open];
+
+    // Alias must be non-empty and must not look like a URL scheme
+    if alias.is_empty() || alias.contains("://") {
+        return None;
+    }
+
+    // Strip the surrounding parentheses
+    let url_part = value.get(open + 2..value.len().checked_sub(1)?)?;
+    if !value.ends_with(')') {
+        return None;
+    }
+
+    let url = RegistryUri::from_str(url_part).ok()?;
+    Some(RegistryRef::ResolvedAlias {
+        alias: alias.to_owned(),
+        url,
+    })
 }
 
 /// Ensure that the URL is valid for a registry
@@ -356,5 +397,49 @@ mod tests {
 
         let dependency = get_dependency("=1");
         assert!(dependency_version_string(&dependency).is_err());
+    }
+
+    #[test]
+    fn from_str_url() {
+        let reg = RegistryRef::from_str("https://conan-us.globusmedical.com/artifactory").unwrap();
+        assert!(matches!(reg, RegistryRef::Url(_)));
+    }
+
+    #[test]
+    fn from_str_alias() {
+        let reg = RegistryRef::from_str("globus").unwrap();
+        assert!(matches!(reg, RegistryRef::Alias(ref a) if a == "globus"));
+    }
+
+    #[test]
+    fn from_str_legacy_resolved_alias() {
+        // Older buffrs versions (< 0.10.1) serialized ResolvedAlias as
+        // "alias (url)" via Display. Verify we recover gracefully.
+        let input = "globus (https://conan-us.globusmedical.com/artifactory)";
+        let reg = RegistryRef::from_str(input).unwrap();
+        match reg {
+            RegistryRef::ResolvedAlias { ref alias, ref url } => {
+                assert_eq!(alias, "globus");
+                assert_eq!(
+                    url.to_string(),
+                    "https://conan-us.globusmedical.com/artifactory"
+                );
+            }
+            other => panic!("expected ResolvedAlias, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_str_legacy_resolved_alias_not_triggered_for_plain_alias() {
+        // A plain alias without parenthesized URL must remain Alias
+        let reg = RegistryRef::from_str("my-registry").unwrap();
+        assert!(matches!(reg, RegistryRef::Alias(ref a) if a == "my-registry"));
+    }
+
+    #[test]
+    fn from_str_legacy_resolved_alias_bad_url_stays_alias() {
+        // If the URL inside parens is invalid, fall back to Alias
+        let reg = RegistryRef::from_str("name (not-a-url)").unwrap();
+        assert!(matches!(reg, RegistryRef::Alias(_)));
     }
 }

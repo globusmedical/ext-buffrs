@@ -1,0 +1,5 @@
+syntax = "proto3";
+
+package api.a;
+
+import "lib/b/types.proto";

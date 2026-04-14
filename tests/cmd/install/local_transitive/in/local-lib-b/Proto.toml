@@ -1,0 +1,6 @@
+[package]
+type = "lib"
+name = "local-lib-b"
+version = "0.2.0"
+
+[dependencies]

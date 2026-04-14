@@ -1,0 +1,7 @@
+[package]
+type = "api"
+name = "local-api-a"
+version = "0.1.0"
+
+[dependencies]
+local-lib-b = { version = "=0.2.0", repository = "grpc", registry = "dummy", path = "../local-lib-b" }
