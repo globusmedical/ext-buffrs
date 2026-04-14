@@ -579,10 +579,10 @@ impl<'a> DependencyGraphBuilder<'a> {
                             version_req.matches(existing_package.version()),
                             "a dependency of your project requires {}@{} which collides with {}@{} required by {:?}",
                             package.name(),
-                            found_version,
+                            version_req,
                             existing_package.name(),
                             existing_package.version(),
-                            name,
+                            entry.dependants(),
                         );
                     }
                 }
@@ -653,10 +653,10 @@ impl<'a> DependencyGraphBuilder<'a> {
                                 version_req.matches(existing_package.version()),
                                 "a dependency of your project requires {}@{} which collides with {}@{} required by {:?}",
                                 package.name(),
-                                found_version,
+                                version_req,
                                 existing_package.name(),
                                 existing_package.version(),
-                                name,
+                                entry.dependants(),
                             );
                         }
                     }
