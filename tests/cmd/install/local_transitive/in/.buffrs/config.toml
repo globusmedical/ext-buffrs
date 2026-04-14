@@ -1,0 +1,4 @@
+edition = "0.10"
+
+[registries]
+dummy = "https://example.com"

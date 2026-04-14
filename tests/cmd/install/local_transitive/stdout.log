@@ -1,0 +1,5 @@
+Using legacy greedy resolver (use_greedy_resolver=true)
+:: packaged local-api-a@0.1.0
+:: packaged local-lib-b@0.2.0
+:: installed local-api-a@0.1.0
+   ┗ installed local-lib-b@0.2.0

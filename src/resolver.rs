@@ -590,24 +590,80 @@ impl<'a> DependencyGraphBuilder<'a> {
 
             package
         } else {
-            // Non-root packages may not be physically present on disk.
-            // Take it from the collected entries instead.
+            // Non-root packages: check if already resolved, otherwise load from disk.
             let mut matches = deps
                 .entries
                 .iter()
                 .filter(|(id, _)| id.name() == &dependency.package);
-            let first = matches.next().ok_or_else(|| {
-                miette::miette!(
-                    "no resolved package found for local dependency {}",
+            if let Some(first) = matches.next() {
+                ensure!(
+                    matches.next().is_none(),
+                    "local dependency {} is ambiguous: multiple resolved versions exist",
                     dependency.package
-                )
-            })?;
-            ensure!(
-                matches.next().is_none(),
-                "local dependency {} is ambiguous: multiple resolved versions exist",
-                dependency.package
-            );
-            first.1.package().clone()
+                );
+
+                let package = first.1.package();
+
+                // Verify version requirement if a publish section exists
+                if let Some(version_req) = dependency
+                    .manifest
+                    .publish
+                    .as_ref()
+                    .map(|p| p.version.clone())
+                {
+                    let found_version = package.version();
+                    ensure!(
+                        version_req.matches(found_version),
+                        "a dependency of your project requires {}@{} but the resolved version is {}",
+                        package.name(),
+                        version_req,
+                        found_version,
+                    );
+                }
+
+                package.clone()
+            } else {
+                // Transitive local dependency not yet resolved — load from disk.
+                let store = PackageStore::open(&abs_manifest_dir).await?;
+                let package = store
+                    .release(&manifest, self.config, Some(deps), false)
+                    .await?;
+
+                // Verify version requirement if a publish section exists
+                if let Some(version_req) = dependency
+                    .manifest
+                    .publish
+                    .as_ref()
+                    .map(|p| p.version.clone())
+                {
+                    let found_version = package.version();
+                    ensure!(
+                        version_req.matches(found_version),
+                        "a dependency of your project requires {}@{} but the resolved version is {}",
+                        package.name(),
+                        version_req,
+                        found_version,
+                    );
+
+                    // In single-version mode, also ensure no clash with already-resolved entry.
+                    if !deps.is_multiversion_permitted(package.name()) {
+                        if let Some(entry) = deps.get_single_by_name(package.name()) {
+                            let existing_package = entry.package();
+                            ensure!(
+                                version_req.matches(existing_package.version()),
+                                "a dependency of your project requires {}@{} which collides with {}@{} required by {:?}",
+                                package.name(),
+                                found_version,
+                                existing_package.name(),
+                                existing_package.version(),
+                                name,
+                            );
+                        }
+                    }
+                }
+
+                package
+            }
         };
 
         let dependency_id =
@@ -1000,6 +1056,9 @@ impl<'a> DependencyGraphBuilder<'a> {
         let mut root_deps = Vec::new();
         let mut remote_deps_to_discover: VecDeque<(PackageName, RemoteDependencyManifest)> =
             VecDeque::new();
+        let mut local_deps_to_discover: VecDeque<(PackageName, LocalDependencyManifest, PathBuf)> =
+            VecDeque::new();
+        let mut queued_local: HashSet<PackageName> = HashSet::new();
         let mut local_packages: HashMap<PackageName, (Package, PathBuf, LocalDependencyManifest)> =
             HashMap::new();
 
@@ -1060,7 +1119,7 @@ impl<'a> DependencyGraphBuilder<'a> {
 
                     // Build the local package
                     let store = PackageStore::open(&abs_manifest_dir).await?;
-                    let mut temp_deps = DependencyGraph::new(self.config.allow_multiple_versions());
+                    let temp_deps = DependencyGraph::new(self.config.allow_multiple_versions());
                     let package = store
                         .release(&local_manifest, self.config, Some(&temp_deps), false)
                         .await?;
@@ -1080,21 +1139,35 @@ impl<'a> DependencyGraphBuilder<'a> {
                         version_req: version_req.clone(),
                     });
 
-                    // Queue its remote sub-dependencies for discovery
+                    // Queue its sub-dependencies for discovery
                     for sub_dep in &package.manifest.dependencies {
-                        if let DependencyManifest::Remote(sub_manifest) = &sub_dep.manifest {
-                            remote_deps_to_discover
-                                .push_back((sub_dep.package.clone(), sub_manifest.clone()));
+                        match &sub_dep.manifest {
+                            DependencyManifest::Remote(sub_manifest) => {
+                                remote_deps_to_discover
+                                    .push_back((sub_dep.package.clone(), sub_manifest.clone()));
 
-                            if let Some(locked) = self.lockfile.find(
-                                &sub_dep.package,
-                                &sub_manifest.version,
-                                Some(&sub_manifest.registry),
-                                Some(&sub_manifest.repository),
-                            ) {
-                                preferred_versions
-                                    .entry(sub_dep.package.clone())
-                                    .or_insert_with(|| locked.version.clone());
+                                if let Some(locked) = self.lockfile.find(
+                                    &sub_dep.package,
+                                    &sub_manifest.version,
+                                    Some(&sub_manifest.registry),
+                                    Some(&sub_manifest.repository),
+                                ) {
+                                    preferred_versions
+                                        .entry(sub_dep.package.clone())
+                                        .or_insert_with(|| locked.version.clone());
+                                }
+                            }
+                            DependencyManifest::Local(sub_manifest) => {
+                                // Queue transitive local deps for discovery
+                                if !local_packages.contains_key(&sub_dep.package)
+                                    && queued_local.insert(sub_dep.package.clone())
+                                {
+                                    local_deps_to_discover.push_back((
+                                        sub_dep.package.clone(),
+                                        sub_manifest.clone(),
+                                        abs_manifest_dir.clone(),
+                                    ));
+                                }
                             }
                         }
                     }
@@ -1105,6 +1178,81 @@ impl<'a> DependencyGraphBuilder<'a> {
                     );
                 }
             }
+        }
+
+        // Discover transitive local dependencies
+        while let Some((pkg_name, manifest, parent_path)) = local_deps_to_discover.pop_front() {
+            if local_packages.contains_key(&pkg_name) {
+                continue;
+            }
+
+            let manifest_dir = if manifest.path.is_relative() {
+                parent_path.join(&manifest.path)
+            } else {
+                manifest.path.clone()
+            };
+
+            let abs_manifest_dir =
+                manifest_dir
+                    .canonicalize()
+                    .into_diagnostic()
+                    .wrap_err(miette::miette!(
+                        "local dependency {} not found at path {}",
+                        pkg_name,
+                        manifest_dir.display()
+                    ))?;
+
+            let local_manifest =
+                Manifest::try_read_from(&abs_manifest_dir.join(MANIFEST_FILE), Some(self.config))
+                    .await?
+                    .ok_or_else(|| {
+                        miette::miette!(
+                            "no `{}` for local package {} found at path {}",
+                            MANIFEST_FILE,
+                            pkg_name,
+                            abs_manifest_dir.join(MANIFEST_FILE).display()
+                        )
+                    })?;
+
+            let store = PackageStore::open(&abs_manifest_dir).await?;
+            let temp_deps = DependencyGraph::new(self.config.allow_multiple_versions());
+            let package = store
+                .release(&local_manifest, self.config, Some(&temp_deps), false)
+                .await?;
+
+            // Queue its sub-dependencies
+            for sub_dep in &package.manifest.dependencies {
+                match &sub_dep.manifest {
+                    DependencyManifest::Remote(sub_manifest) => {
+                        remote_deps_to_discover
+                            .push_back((sub_dep.package.clone(), sub_manifest.clone()));
+
+                        if let Some(locked) = self.lockfile.find(
+                            &sub_dep.package,
+                            &sub_manifest.version,
+                            Some(&sub_manifest.registry),
+                            Some(&sub_manifest.repository),
+                        ) {
+                            preferred_versions
+                                .entry(sub_dep.package.clone())
+                                .or_insert_with(|| locked.version.clone());
+                        }
+                    }
+                    DependencyManifest::Local(sub_manifest) => {
+                        if !local_packages.contains_key(&sub_dep.package)
+                            && queued_local.insert(sub_dep.package.clone())
+                        {
+                            local_deps_to_discover.push_back((
+                                sub_dep.package.clone(),
+                                sub_manifest.clone(),
+                                abs_manifest_dir.clone(),
+                            ));
+                        }
+                    }
+                }
+            }
+
+            local_packages.insert(pkg_name, (package, abs_manifest_dir, manifest));
         }
 
         // Phase 2: Discover all remote packages and their metadata
