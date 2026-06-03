@@ -31,6 +31,7 @@ use semver::{Version, VersionReq};
 use std::{
     collections::HashMap,
     env,
+    io::IsTerminal,
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -869,7 +870,9 @@ pub async fn login(
     let token = if let Some(token) = token {
         token
     } else {
-        tracing::info!(":: please enter your artifactory token:");
+        if std::io::stdin().is_terminal() {
+            tracing::info!(":: please enter your artifactory token:");
+        }
 
         let mut raw = String::new();
         let mut reader = BufReader::new(io::stdin());

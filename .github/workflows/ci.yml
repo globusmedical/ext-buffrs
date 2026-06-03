@@ -61,3 +61,55 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo install typos-cli@=1.16.26 --locked || true
       - run: typos
+
+  # Auto-tag releases when merging to main-gm.
+  # Pushes a gm/v{x.y.z} tag matching the Cargo.toml version, which triggers release.yml.
+  # Requires GH_PAT_REPO_ACCESS secret (a PAT with contents:write) so the tag push
+  # can cascade to the release workflow. GITHUB_TOKEN would be silently suppressed.
+  tag-release:
+    if: github.event_name == 'push' && github.ref_name == 'main-gm'
+    needs: [fmt, deny, typos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from Cargo.toml
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(grep -oP '^version = "\K[^"]+' Cargo.toml)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=gm/v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check if tag already exists
+        id: check_tag
+        shell: bash
+        run: |
+          TAG="gm/v${{ steps.version.outputs.version }}"
+          if git tag -l "$TAG" | grep -q . || git ls-remote origin "refs/tags/$TAG" 2>/dev/null | grep -q .; then
+            echo "Tag $TAG already exists — skipping"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create and push tag
+        if: steps.check_tag.outputs.exists == 'false'
+        shell: bash
+        env:
+          GIT_PAT: ${{ secrets.GH_PAT_REPO_ACCESS }}
+        run: |
+          if [ -z "${GIT_PAT}" ]; then
+            echo "::warning title=Missing GH_PAT_REPO_ACCESS secret::A PAT is required so the gm/v* tag push triggers release.yml. Without it, the tag was NOT pushed."
+            exit 0
+          fi
+          TAG="gm/v${{ steps.version.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG"
+          git remote set-url origin "https://x-access-token:${GIT_PAT}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin "$TAG"
