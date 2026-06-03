@@ -1,3 +1,4 @@
+mod dependants_lock;
 mod empty;
 mod local;
 mod local_transitive;
