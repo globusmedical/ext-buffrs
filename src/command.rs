@@ -29,7 +29,7 @@ use async_recursion::async_recursion;
 use miette::{bail, ensure, miette, Context, IntoDiagnostic};
 use semver::{Version, VersionReq};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     path::{Path, PathBuf},
     str::FromStr,
@@ -444,6 +444,43 @@ async fn rewrite_proto_namespaces_in_dir(dir: &Path, version: &Version) -> miett
     Ok(())
 }
 
+fn dependant_counts_by_id(graph: &DependencyGraph) -> HashMap<ResolvedPackageId, usize> {
+    dependant_counts_from_edges(
+        graph.roots(),
+        graph
+            .iter()
+            .map(|(id, resolved)| (id, resolved.depends_on())),
+    )
+}
+
+fn dependant_counts_from_edges<'a>(
+    roots: impl IntoIterator<Item = &'a ResolvedPackageId>,
+    edges: impl IntoIterator<Item = (&'a ResolvedPackageId, &'a [ResolvedPackageId])>,
+) -> HashMap<ResolvedPackageId, usize> {
+    let mut counts = HashMap::new();
+
+    for root in roots {
+        counts.entry(root.clone()).or_insert(1);
+    }
+
+    let mut parents_by_child: HashMap<ResolvedPackageId, HashSet<ResolvedPackageId>> =
+        HashMap::new();
+
+    for (parent_id, dependency_ids) in edges {
+        for dependency_id in dependency_ids {
+            if parents_by_child
+                .entry(dependency_id.clone())
+                .or_default()
+                .insert(parent_id.clone())
+            {
+                *counts.entry(dependency_id.clone()).or_default() += 1;
+            }
+        }
+    }
+
+    counts
+}
+
 /// Installs dependencies
 ///
 /// # Arguments
@@ -490,6 +527,8 @@ pub async fn install(
             .await
             .wrap_err(miette!("dependency resolution failed"))?;
 
+    let dependant_counts = dependant_counts_by_id(&dependency_graph);
+
     let mut locked = Vec::new();
     let mut visited = std::collections::HashSet::new();
 
@@ -500,6 +539,7 @@ pub async fn install(
         store: &PackageStore,
         locked: &mut Vec<LockedPackage>,
         visited: &mut std::collections::HashSet<ResolvedPackageId>,
+        dependant_counts: &HashMap<ResolvedPackageId, usize>,
         prefix: String,
     ) -> miette::Result<()> {
         // Skip if already visited (avoids duplicates in diamond dependencies)
@@ -542,7 +582,6 @@ pub async fn install(
             package,
             registry,
             repository,
-            dependants,
             ..
         } = &resolved
         {
@@ -555,9 +594,14 @@ pub async fn install(
                 })
                 .collect();
 
+            let dependant_count = dependant_counts
+                .get(id)
+                .copied()
+                .ok_or_else(|| miette!("unexpected error: missing dependant count for {id}"))?;
+
             locked.push(
                 package
-                    .lock(registry.clone(), repository.clone(), dependants.len())
+                    .lock(registry.clone(), repository.clone(), dependant_count)
                     .with_resolved_dependencies(resolved_deps),
             );
         }
@@ -574,7 +618,16 @@ pub async fn install(
                 if prefix.is_empty() { "  " } else { &prefix }
             );
 
-            traverse_and_install(dependency, graph, store, locked, visited, new_prefix).await?;
+            traverse_and_install(
+                dependency,
+                graph,
+                store,
+                locked,
+                visited,
+                dependant_counts,
+                new_prefix,
+            )
+            .await?;
         }
 
         Ok(())
@@ -587,6 +640,7 @@ pub async fn install(
             &store,
             &mut locked,
             &mut visited,
+            &dependant_counts,
             String::new(),
         )
         .await?;
@@ -925,7 +979,16 @@ pub mod lock {
 
 #[cfg(test)]
 mod tests {
-    use super::DependencyLocator;
+    use super::{dependant_counts_from_edges, DependencyLocator};
+    use crate::{package::PackageName, resolver::ResolvedPackageId};
+    use semver::Version;
+
+    fn id(name: &str, major: u64, minor: u64, patch: u64) -> ResolvedPackageId {
+        ResolvedPackageId::new(
+            PackageName::new(name).expect("test package name should be valid"),
+            Version::new(major, minor, patch),
+        )
+    }
 
     #[test]
     fn valid_dependency_locator() {
@@ -954,5 +1017,68 @@ mod tests {
             .is_err());
         assert!("repo/pkg@=1#meta".parse::<DependencyLocator>().is_err());
         assert!("repo/PKG@=1.0".parse::<DependencyLocator>().is_err());
+    }
+
+    #[test]
+    fn dependant_counts_include_virtual_root_for_direct_dependencies() {
+        let api_a = id("api-a", 1, 0, 0);
+
+        let counts = dependant_counts_from_edges([&api_a], std::iter::empty());
+
+        assert_eq!(counts.get(&api_a), Some(&1));
+    }
+
+    #[test]
+    fn dependant_counts_count_each_unique_parent_once() {
+        let api_a = id("api-a", 1, 0, 0);
+        let api_b = id("api-b", 1, 0, 0);
+        let lib_shared = id("lib-shared", 1, 0, 0);
+        let api_a_deps = vec![lib_shared.clone()];
+        let api_b_deps = vec![lib_shared.clone()];
+
+        let counts = dependant_counts_from_edges(
+            [&api_a, &api_b],
+            [
+                (&api_a, api_a_deps.as_slice()),
+                (&api_b, api_b_deps.as_slice()),
+            ],
+        );
+
+        assert_eq!(counts.get(&api_a), Some(&1));
+        assert_eq!(counts.get(&api_b), Some(&1));
+        assert_eq!(counts.get(&lib_shared), Some(&2));
+    }
+
+    #[test]
+    fn dependant_counts_deduplicate_duplicate_edges_from_same_parent() {
+        let api_a = id("api-a", 1, 0, 0);
+        let lib_shared = id("lib-shared", 1, 0, 0);
+        let api_a_deps = vec![lib_shared.clone(), lib_shared.clone()];
+
+        let counts = dependant_counts_from_edges([&api_a], [(&api_a, api_a_deps.as_slice())]);
+
+        assert_eq!(counts.get(&api_a), Some(&1));
+        assert_eq!(counts.get(&lib_shared), Some(&1));
+    }
+
+    #[test]
+    fn dependant_counts_track_package_versions_independently() {
+        let api_a = id("api-a", 1, 0, 0);
+        let api_b = id("api-b", 1, 0, 0);
+        let lib_shared_v1 = id("lib-shared", 1, 0, 0);
+        let lib_shared_v2 = id("lib-shared", 2, 0, 0);
+        let api_a_deps = vec![lib_shared_v1.clone()];
+        let api_b_deps = vec![lib_shared_v2.clone()];
+
+        let counts = dependant_counts_from_edges(
+            [&api_a, &api_b],
+            [
+                (&api_a, api_a_deps.as_slice()),
+                (&api_b, api_b_deps.as_slice()),
+            ],
+        );
+
+        assert_eq!(counts.get(&lib_shared_v1), Some(&1));
+        assert_eq!(counts.get(&lib_shared_v2), Some(&1));
     }
 }
