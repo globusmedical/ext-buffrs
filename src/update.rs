@@ -272,7 +272,7 @@ fn extract_binary_from_archive(archive_bytes: &[u8]) -> miette::Result<Vec<u8>> 
                 .by_index(i)
                 .into_diagnostic()
                 .wrap_err("failed to read ZIP entry")?;
-            if file.name().ends_with(BINARY_NAME) {
+            if file.name().is_ok_and(|name| name.ends_with(BINARY_NAME)) {
                 let mut contents = Vec::new();
                 file.read_to_end(&mut contents)
                     .into_diagnostic()
