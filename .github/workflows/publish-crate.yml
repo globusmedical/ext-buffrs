@@ -44,6 +44,10 @@ jobs:
   publish:
     name: publish
     runs-on: ubuntu-latest
+    # The registry index and publish token are secrets of this environment,
+    # which only runs for gm/v* tags and for dispatches from main-gm, so no
+    # other workflow or ref of this public repository can read the token.
+    environment: crate-publish
     steps:
     - name: Resolve the release tag
       id: tag
@@ -88,7 +92,7 @@ jobs:
         echo "Publishing $CRATE_NAME $PACKAGE_VERSION"
 
     # Same cargo configuration as the shared setup-jfrog-publishing action:
-    # the globus registry with its index and token from the org secrets.
+    # the globus registry with its index and token from the environment's secrets.
     - name: Configure the globus registry
       shell: bash
       env:
