@@ -14,7 +14,12 @@
 
 use miette::{Context, IntoDiagnostic};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, io::ErrorKind, path::PathBuf};
+use std::{
+    collections::HashMap,
+    io::{ErrorKind, Write},
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+};
 use tokio::fs;
 
 use crate::{
@@ -76,16 +81,14 @@ impl Credentials {
 
         let data: RawCredentialCollection = self.clone().into();
 
-        fs::write(
-            location,
-            toml::to_string(&data)
-                .into_diagnostic()
-                .wrap_err(SerializationError(ManagedFile::Credentials))?
-                .into_bytes(),
-        )
-        .await
-        .into_diagnostic()
-        .wrap_err(WriteError(CREDENTIALS_FILE))
+        let contents = toml::to_string(&data)
+            .into_diagnostic()
+            .wrap_err(SerializationError(ManagedFile::Credentials))?;
+
+        replace_file(&location, contents.as_bytes())
+            .await
+            .into_diagnostic()
+            .wrap_err(WriteError(CREDENTIALS_FILE))
     }
 
     /// Loads the credentials from the file system, returning default credentials if
@@ -96,6 +99,57 @@ impl Credentials {
     pub async fn load() -> miette::Result<Self> {
         Ok(Self::read().await?.unwrap_or_else(Credentials::default))
     }
+}
+
+/// Replaces `path` with `contents` so that concurrent readers see either the
+/// previous file or the complete new one, never a truncated file.
+///
+/// Parallel build scripts log in and read credentials at the same time, so a
+/// plain truncate-and-write lets a reader parse an empty store and fail with
+/// "unauthorized".
+///
+/// Each call writes its own temporary file, created owner-only on Unix because
+/// the rename gives `path` the temporary file's permissions.
+async fn replace_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
+    let mut temp_name = path.file_name().unwrap_or_default().to_os_string();
+    temp_name.push(format!(
+        ".{}.{}.tmp",
+        std::process::id(),
+        NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let temp_path = path.with_file_name(temp_name);
+
+    if let Err(error) = write_private_file(&temp_path, contents).await {
+        fs::remove_file(&temp_path).await.ok();
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&temp_path, path).await {
+        fs::remove_file(&temp_path).await.ok();
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Creates `path`, which must not exist, readable and writable by the owner
+/// only on Unix, and writes `contents` to it.
+async fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let path = path.to_owned();
+    let contents = contents.to_owned();
+
+    tokio::task::spawn_blocking(move || {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+
+        let mut file = options.open(&path)?;
+        file.write_all(&contents)?;
+        file.sync_all()
+    })
+    .await
+    .map_err(std::io::Error::other)?
 }
 
 /// Credential store for storing authentication data. Serialization type.
@@ -135,5 +189,82 @@ impl From<Credentials> for RawCredentialCollection {
             .collect();
 
         Self { credentials }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_readers_never_see_a_partial_credentials_file() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let path = dir.path().join(CREDENTIALS_FILE);
+        let contents = "x".repeat(1 << 20);
+        replace_file(&path, contents.as_bytes()).await.unwrap();
+
+        let writer = {
+            let path = path.clone();
+            let contents = contents.clone();
+            tokio::spawn(async move {
+                for _ in 0..200 {
+                    replace_file(&path, contents.as_bytes()).await.unwrap();
+                }
+            })
+        };
+
+        while !writer.is_finished() {
+            // On Windows a read can fail while the file is being replaced.
+            if let Ok(read) = fs::read_to_string(&path).await {
+                assert_eq!(read.len(), contents.len());
+            }
+        }
+        writer.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn overlapping_writers_in_one_process_each_replace_the_whole_file() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let path = dir.path().join(CREDENTIALS_FILE);
+        let contents = "x".repeat(1 << 20);
+
+        let writers: Vec<_> = (0..4)
+            .map(|_| {
+                let path = path.clone();
+                let contents = contents.clone();
+                tokio::spawn(async move {
+                    for _ in 0..50 {
+                        replace_file(&path, contents.as_bytes()).await.unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.await.unwrap();
+        }
+
+        assert_eq!(fs::read_to_string(&path).await.unwrap(), contents);
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name != CREDENTIALS_FILE)
+            .collect();
+        assert!(leftovers.is_empty(), "temporary files left: {leftovers:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn replacing_a_private_credentials_file_keeps_it_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = assert_fs::TempDir::new().unwrap();
+        let path = dir.path().join(CREDENTIALS_FILE);
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        replace_file(&path, b"new").await.unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 }
