@@ -1255,161 +1255,237 @@ impl<'a> DependencyGraphBuilder<'a> {
             local_packages.insert(pkg_name, (package, abs_manifest_dir, manifest));
         }
 
-        // Phase 2: Discover all remote packages and their metadata
-        let provider = BuffrsDependencyProvider::new(root_deps);
-        let mut discovered: HashSet<PackageName> = HashSet::new();
+        // Phases 2 and 3 run once with the locked versions as the only candidates, which needs
+        // no registry listing, and again against the full registry if those versions no longer
+        // satisfy the manifests.
+        let mut use_lock = true;
+        let resolved = loop {
+            // Phase 2: Discover all remote packages and their metadata
+            let provider = BuffrsDependencyProvider::new(root_deps.clone());
+            let mut discovered: HashSet<PackageName> = HashSet::new();
+            let mut remote_deps_to_discover = remote_deps_to_discover.clone();
+            let mut locked_candidates = 0_usize;
 
-        for (name, version) in preferred_versions {
-            provider.set_preferred_version(name, version);
-        }
+            for (name, version) in &preferred_versions {
+                provider.set_preferred_version(name.clone(), version.clone());
+            }
 
-        // Add local packages to provider first (they have exactly one version)
-        for (name, (package, _, _)) in &local_packages {
-            let version = package.version().clone();
+            // Add local packages to provider first (they have exactly one version)
+            for (name, (package, _, _)) in &local_packages {
+                let version = package.version().clone();
 
-            // Collect dependencies from local package
-            let mut pkg_deps = Vec::new();
-            for dep in &package.manifest.dependencies {
-                match &dep.manifest {
-                    DependencyManifest::Remote(dep_manifest) => {
-                        pkg_deps.push(PackageDependency {
-                            package: dep.package.clone(),
-                            version_req: dep_manifest.version.clone(),
-                        });
-                    }
-                    DependencyManifest::Local(dep_manifest) => {
-                        // Local sub-dep: use exact version from manifest or star
-                        let sub_version_req = dep_manifest
-                            .publish
-                            .as_ref()
-                            .map_or(VersionReq::STAR, |p| p.version.clone());
-                        pkg_deps.push(PackageDependency {
-                            package: dep.package.clone(),
-                            version_req: sub_version_req,
-                        });
+                // Collect dependencies from local package
+                let mut pkg_deps = Vec::new();
+                for dep in &package.manifest.dependencies {
+                    match &dep.manifest {
+                        DependencyManifest::Remote(dep_manifest) => {
+                            pkg_deps.push(PackageDependency {
+                                package: dep.package.clone(),
+                                version_req: dep_manifest.version.clone(),
+                            });
+                        }
+                        DependencyManifest::Local(dep_manifest) => {
+                            // Local sub-dep: use exact version from manifest or star
+                            let sub_version_req = dep_manifest
+                                .publish
+                                .as_ref()
+                                .map_or(VersionReq::STAR, |p| p.version.clone());
+                            pkg_deps.push(PackageDependency {
+                                package: dep.package.clone(),
+                                version_req: sub_version_req,
+                            });
+                        }
                     }
                 }
+
+                let mut dependencies_map = HashMap::new();
+                dependencies_map.insert(version.clone(), pkg_deps);
+
+                provider.add_package(
+                    name.clone(),
+                    PackageInfo {
+                        versions: vec![version],
+                        dependencies: dependencies_map,
+                    },
+                );
+                discovered.insert(name.clone());
             }
 
-            let mut dependencies_map = HashMap::new();
-            dependencies_map.insert(version.clone(), pkg_deps);
+            // Discover remote packages
+            while !remote_deps_to_discover.is_empty() {
+                let (pkg_name, manifest) = remote_deps_to_discover
+                    .pop_front()
+                    .expect("queue is non-empty");
 
-            provider.add_package(
-                name.clone(),
-                PackageInfo {
-                    versions: vec![version],
-                    dependencies: dependencies_map,
-                },
-            );
-            discovered.insert(name.clone());
-        }
+                if discovered.contains(&pkg_name) {
+                    continue;
+                }
+                discovered.insert(pkg_name.clone());
 
-        // Discover remote packages
-        while !remote_deps_to_discover.is_empty() {
-            let (pkg_name, manifest) = remote_deps_to_discover
-                .pop_front()
-                .expect("queue is non-empty");
+                let locked = self.lockfile.find(
+                    &pkg_name,
+                    &manifest.version,
+                    Some(&manifest.registry),
+                    Some(&manifest.repository),
+                );
 
-            if discovered.contains(&pkg_name) {
-                continue;
-            }
-            discovered.insert(pkg_name.clone());
+                if let Some(locked) = locked {
+                    provider.set_preferred_version(pkg_name.clone(), locked.version.clone());
+                }
 
-            if let Some(locked) = self.lockfile.find(
-                &pkg_name,
-                &manifest.version,
-                Some(&manifest.registry),
-                Some(&manifest.repository),
-            ) {
-                provider.set_preferred_version(pkg_name.clone(), locked.version.clone());
-            }
+                tracing::debug!("Discovering package: {}", pkg_name);
 
-            tracing::debug!("Discovering package: {}", pkg_name);
+                // A locked package offers its locked version as the only candidate. Its manifest
+                // comes from the cache or a single download, so an install whose Proto.lock is
+                // current neither lists nor downloads the other versions in the registry.
+                if let Some(locked) = locked.filter(|_| use_lock) {
+                    let package = self
+                        .fetch_remote(&pkg_name, &manifest, &locked.version)
+                        .await
+                        .wrap_err(DownloadError {
+                            name: pkg_name.clone(),
+                            version: manifest.version.clone(),
+                        })?;
 
-            // Create registry client
-            let registry = self.create_artifactory(manifest.registry.clone().try_into()?)?;
+                    let mut pkg_deps = Vec::new();
+                    for dep in &package.manifest.dependencies {
+                        match &dep.manifest {
+                            DependencyManifest::Remote(dep_manifest) => {
+                                pkg_deps.push(PackageDependency {
+                                    package: dep.package.clone(),
+                                    version_req: dep_manifest.version.clone(),
+                                });
 
-            // Get all available versions
-            let versions = registry
-                .list_versions(manifest.repository.clone(), pkg_name.clone())
-                .await?;
+                                if !discovered.contains(&dep.package) {
+                                    remote_deps_to_discover
+                                        .push_back((dep.package.clone(), dep_manifest.clone()));
+                                }
+                            }
+                            DependencyManifest::Local(dep_manifest) => {
+                                let sub_version_req = dep_manifest
+                                    .publish
+                                    .as_ref()
+                                    .map_or(VersionReq::STAR, |p| p.version.clone());
+                                pkg_deps.push(PackageDependency {
+                                    package: dep.package.clone(),
+                                    version_req: sub_version_req,
+                                });
+                            }
+                        }
+                    }
 
-            if versions.is_empty() {
-                miette::bail!(
-                    "no versions of {} found in repository {}",
+                    locked_candidates += 1;
+                    provider.add_package(
+                        pkg_name,
+                        PackageInfo {
+                            versions: vec![locked.version.clone()],
+                            dependencies: HashMap::from([(locked.version.clone(), pkg_deps)]),
+                        },
+                    );
+                    continue;
+                }
+
+                // Create registry client
+                let registry = self.create_artifactory(manifest.registry.clone().try_into()?)?;
+
+                // Get all available versions
+                let versions = registry
+                    .list_versions(manifest.repository.clone(), pkg_name.clone())
+                    .await?;
+
+                if versions.is_empty() {
+                    miette::bail!(
+                        "no versions of {} found in repository {}",
+                        pkg_name,
+                        manifest.repository
+                    );
+                }
+
+                // Fetch dependencies for each version
+                let mut dependencies_map: HashMap<Version, Vec<PackageDependency>> = HashMap::new();
+
+                for version in &versions {
+                    // Download package to get its manifest
+                    match registry
+                        .download_version(&manifest.repository, &pkg_name, version)
+                        .await
+                    {
+                        Ok(package) => {
+                            let mut pkg_deps = Vec::new();
+                            for dep in &package.manifest.dependencies {
+                                match &dep.manifest {
+                                    DependencyManifest::Remote(dep_manifest) => {
+                                        pkg_deps.push(PackageDependency {
+                                            package: dep.package.clone(),
+                                            version_req: dep_manifest.version.clone(),
+                                        });
+
+                                        // Add to discovery queue
+                                        if !discovered.contains(&dep.package) {
+                                            remote_deps_to_discover.push_back((
+                                                dep.package.clone(),
+                                                dep_manifest.clone(),
+                                            ));
+                                        }
+                                    }
+                                    DependencyManifest::Local(dep_manifest) => {
+                                        // Remote package has local dep - use version from manifest
+                                        let sub_version_req = dep_manifest
+                                            .publish
+                                            .as_ref()
+                                            .map_or(VersionReq::STAR, |p| p.version.clone());
+                                        pkg_deps.push(PackageDependency {
+                                            package: dep.package.clone(),
+                                            version_req: sub_version_req,
+                                        });
+                                    }
+                                }
+                            }
+                            dependencies_map.insert(version.clone(), pkg_deps);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to fetch {}@{}: {} - skipping version",
+                                pkg_name,
+                                version,
+                                e
+                            );
+                        }
+                    }
+                }
+
+                provider.add_package(
                     pkg_name,
-                    manifest.repository
+                    PackageInfo {
+                        versions: versions.clone(),
+                        dependencies: dependencies_map,
+                    },
                 );
             }
 
-            // Fetch dependencies for each version
-            let mut dependencies_map: HashMap<Version, Vec<PackageDependency>> = HashMap::new();
+            // Phase 3: Run PubGrub resolution
+            tracing::debug!(
+                "Running PubGrub resolution on {} packages...",
+                discovered.len()
+            );
 
-            for version in &versions {
-                // Download package to get its manifest
-                match registry
-                    .download_version(&manifest.repository, &pkg_name, version)
-                    .await
-                {
-                    Ok(package) => {
-                        let mut pkg_deps = Vec::new();
-                        for dep in &package.manifest.dependencies {
-                            match &dep.manifest {
-                                DependencyManifest::Remote(dep_manifest) => {
-                                    pkg_deps.push(PackageDependency {
-                                        package: dep.package.clone(),
-                                        version_req: dep_manifest.version.clone(),
-                                    });
-
-                                    // Add to discovery queue
-                                    if !discovered.contains(&dep.package) {
-                                        remote_deps_to_discover
-                                            .push_back((dep.package.clone(), dep_manifest.clone()));
-                                    }
-                                }
-                                DependencyManifest::Local(dep_manifest) => {
-                                    // Remote package has local dep - use version from manifest
-                                    let sub_version_req = dep_manifest
-                                        .publish
-                                        .as_ref()
-                                        .map_or(VersionReq::STAR, |p| p.version.clone());
-                                    pkg_deps.push(PackageDependency {
-                                        package: dep.package.clone(),
-                                        version_req: sub_version_req,
-                                    });
-                                }
-                            }
-                        }
-                        dependencies_map.insert(version.clone(), pkg_deps);
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to fetch {}@{}: {} - skipping version",
-                            pkg_name,
-                            version,
-                            e
-                        );
-                    }
+            match crate::pubgrub_resolver::resolve(&provider) {
+                Ok(resolved) => break resolved,
+                Err(e) if use_lock && locked_candidates > 0 => {
+                    tracing::debug!(
+                    "locked versions do not satisfy the manifests ({}), resolving against the registry",
+                    e.message
+                );
+                    use_lock = false;
+                }
+                Err(e) => {
+                    return Err(miette::miette!(
+                        "dependency resolution failed:\n{}",
+                        e.message
+                    ))
                 }
             }
-
-            provider.add_package(
-                pkg_name,
-                PackageInfo {
-                    versions: versions.clone(),
-                    dependencies: dependencies_map,
-                },
-            );
-        }
-
-        // Phase 3: Run PubGrub resolution
-        tracing::debug!(
-            "Running PubGrub resolution on {} packages...",
-            discovered.len()
-        );
-
-        let resolved = crate::pubgrub_resolver::resolve(&provider)
-            .map_err(|e| miette::miette!("dependency resolution failed:\n{}", e.message))?;
+        };
 
         tracing::debug!(
             "Resolved {} packages: {}",
@@ -1436,21 +1512,9 @@ impl<'a> DependencyGraphBuilder<'a> {
                         )
                     })?;
 
-                    // Download the resolved version
-                    let registry =
-                        self.create_artifactory(manifest.registry.clone().try_into()?)?;
-
-                    let package = registry
-                        .download_version(
-                            &manifest.repository,
-                            &dependency.package,
-                            resolved_version,
-                        )
+                    let package = self
+                        .fetch_remote(&dependency.package, manifest, resolved_version)
                         .await?;
-
-                    // Cache the package
-                    let key = Entry::from(&package);
-                    self.cache.put(key, package.tgz.clone()).await.ok();
 
                     let dependency_id =
                         ResolvedPackageId::new(package.name().clone(), package.version().clone());
@@ -1527,6 +1591,55 @@ impl<'a> DependencyGraphBuilder<'a> {
         Ok(deps)
     }
 
+    /// Returns the given version of a remote package, from the cache when `Proto.lock` pins it.
+    ///
+    /// The cache is keyed by digest, which only the lockfile knows before a download, so a
+    /// version missing from the lockfile is always downloaded. Every download is stored in the
+    /// cache.
+    async fn fetch_remote(
+        &self,
+        name: &PackageName,
+        manifest: &RemoteDependencyManifest,
+        version: &Version,
+    ) -> miette::Result<Package> {
+        let locked = VersionReq::parse(&format!("={version}"))
+            .ok()
+            .and_then(|exact| {
+                self.lockfile.find(
+                    name,
+                    &exact,
+                    Some(&manifest.registry),
+                    Some(&manifest.repository),
+                )
+            })
+            .filter(|locked| &locked.version == version);
+
+        if let Some(locked) = locked {
+            let cached = match FileRequirement::try_from(locked) {
+                Ok(requirement) => self.cache.get(requirement).await.ok().flatten(),
+                Err(_) => None,
+            };
+
+            if let Some(cached) = cached.filter(|cached| locked.validate(cached).is_ok()) {
+                tracing::debug!("Using cached {}@{}", name, version);
+                return Ok(cached);
+            }
+        }
+
+        let registry = self.create_artifactory(manifest.registry.clone().try_into()?)?;
+
+        let package = registry
+            .download_version(&manifest.repository, name, version)
+            .await?;
+
+        self.cache
+            .put(Entry::from(&package), package.tgz.clone())
+            .await
+            .ok();
+
+        Ok(package)
+    }
+
     /// Recursively builds sub-dependencies using pre-resolved versions from `PubGrub`.
     #[async_recursion]
     async fn build_pubgrub_subdeps(
@@ -1565,17 +1678,9 @@ impl<'a> DependencyGraphBuilder<'a> {
                         continue;
                     }
 
-                    // Download the resolved version
-                    let registry =
-                        self.create_artifactory(manifest.registry.clone().try_into()?)?;
-
-                    let sub_package = registry
-                        .download_version(&manifest.repository, &sub_dep.package, resolved_version)
+                    let sub_package = self
+                        .fetch_remote(&sub_dep.package, manifest, resolved_version)
                         .await?;
-
-                    // Cache it
-                    let key = Entry::from(&sub_package);
-                    self.cache.put(key, sub_package.tgz.clone()).await.ok();
 
                     // Recursively process its dependencies
                     let nested_ids = self

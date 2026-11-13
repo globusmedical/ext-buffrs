@@ -22,6 +22,7 @@ use miette::{ensure, miette, Context, IntoDiagnostic};
 use reqwest::{Body, Method, Response};
 use semver::Version;
 use serde::Deserialize;
+use std::time::Duration;
 use url::Url;
 
 /// The policy for validating artifactory server certificates
@@ -462,14 +463,90 @@ impl RequestBuilder {
     }
 
     async fn send(self) -> miette::Result<ValidatedResponse> {
-        self.0.send().await.into_diagnostic()?.try_into()
+        self.send_with_retry().await?.try_into()
     }
 
     /// Send request and return raw response without validation.
     /// Used for checking artifact existence where 404 is an expected outcome.
     async fn send_raw(self) -> miette::Result<reqwest::Response> {
-        self.0.send().await.into_diagnostic()
+        self.send_with_retry().await
     }
+
+    /// Sends the request, waiting and resending while the registry throttles it.
+    ///
+    /// A registry behind a rate limiter answers 429 (or 503 while overloaded) to a burst of
+    /// requests, which several concurrent installs from one address produce. The request is
+    /// resent up to [`MAX_SEND_ATTEMPTS`] times in total. A request whose body cannot be
+    /// replayed is sent once.
+    async fn send_with_retry(self) -> miette::Result<reqwest::Response> {
+        let mut attempt = 1;
+
+        loop {
+            let Some(request) = self.0.try_clone() else {
+                return self.0.send().await.into_diagnostic();
+            };
+
+            let response = request.send().await.into_diagnostic()?;
+
+            if !is_throttled(response.status()) || attempt >= MAX_SEND_ATTEMPTS {
+                return Ok(response);
+            }
+
+            let delay = retry_delay(response.headers(), attempt);
+
+            tracing::warn!(
+                "registry answered {} for {}, retrying in {:.1}s (attempt {attempt} of {MAX_SEND_ATTEMPTS})",
+                response.status(),
+                response.url(),
+                delay.as_secs_f64()
+            );
+
+            tokio::time::sleep(delay).await;
+            attempt += 1;
+        }
+    }
+}
+
+/// Total number of times a throttled request is sent before its response is returned as is.
+const MAX_SEND_ATTEMPTS: u32 = 6;
+
+/// Longest wait between two attempts, also applied to a `Retry-After` header.
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
+
+/// Whether the status asks the client to slow down and try again.
+fn is_throttled(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+}
+
+/// Time to wait before resending after the given attempt (1-based).
+///
+/// Honors a `Retry-After` header given in seconds. Without one the wait doubles from one
+/// second per attempt, plus up to 50% jitter so that concurrent installs spread out.
+fn retry_delay(headers: &reqwest::header::HeaderMap, attempt: u32) -> Duration {
+    let retry_after = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs);
+
+    let delay = retry_after.unwrap_or_else(|| {
+        let base = Duration::from_secs(1) * 2u32.saturating_pow(attempt.saturating_sub(1));
+        base + base.mul_f64(0.5 * jitter_fraction())
+    });
+
+    delay.min(MAX_RETRY_DELAY)
+}
+
+/// A pseudo-random value in `[0, 1)`, seeded per call by the standard library's hasher.
+fn jitter_fraction() -> f64 {
+    use std::hash::{BuildHasher, Hasher};
+
+    let random = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
+
+    (random % 1000) as f64 / 1000.0
 }
 
 struct ValidatedResponse(reqwest::Response);
