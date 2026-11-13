@@ -1,7 +1,8 @@
+use indexmap::IndexMap;
 use miette::{miette, Context, IntoDiagnostic};
 use pretty_yaml::config::FormatOptions;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fs, io::Write, path::PathBuf};
+use std::{fs, io::Write, path::PathBuf};
 use walkdir::WalkDir;
 
 use crate::{manifest::Manifest, package::PackageStore, resolver::DependencyGraph};
@@ -13,6 +14,8 @@ const BUF_YAML_FILE: &str = "buf.yaml";
 /// Representation of a Buf YAML file
 pub struct BufYamlFile {
     config: Config,
+    /// The configuration as read from disk, if it was loaded from a file
+    on_disk: Option<Config>,
     buf_yaml_path: PathBuf,
     proto_rel_path: String,
     vendor_rel_path: String,
@@ -44,6 +47,7 @@ impl BufYamlFile {
 
         Ok(Self {
             config,
+            on_disk: None,
             buf_yaml_path,
             proto_rel_path,
             vendor_rel_path,
@@ -55,7 +59,16 @@ impl BufYamlFile {
         let proto_path = store.proto_path();
         let buf_yaml_path = proto_path.join(BUF_YAML_FILE);
         let yaml_content = fs::read_to_string(buf_yaml_path).into_diagnostic()?;
-        Self::new_from_str(&yaml_content, store)
+        let mut buf_yaml = Self::new_from_str(&yaml_content, store)?;
+        buf_yaml.on_disk = Some(buf_yaml.config.clone());
+        Ok(buf_yaml)
+    }
+
+    /// Whether the configuration still matches the file it was loaded from.
+    ///
+    /// Map comparisons ignore key order, as buf does.
+    pub fn is_unchanged(&self) -> bool {
+        self.on_disk.as_ref() == Some(&self.config)
     }
 
     /// Serialize the `BufYamlFile` to a string
@@ -94,7 +107,7 @@ impl BufYamlFile {
         // Add vendor modules
         for module in vendor_modules {
             self.config.modules.push(Module {
-                path: format!("{}/{}", &self.vendor_rel_path, module),
+                path: format!("{}/{}", self.vendor_rel_path, module),
                 ..Default::default()
             });
         }
@@ -147,6 +160,14 @@ pub fn generate_buf_yaml_file(
         }
     }
     buf_yaml.set_vendor_modules(vendor_modules);
+
+    // Leave an up-to-date file alone, so that its comments and formatting
+    // survive and its modification time does not change.
+    if buf_yaml.is_unchanged() {
+        tracing::debug!("{} is up to date", buf_yaml_file.display());
+        return Ok(());
+    }
+
     buf_yaml
         .to_file()
         .wrap_err(miette!("failed to write buf.yaml file"))?;
@@ -171,7 +192,7 @@ deps:
   - buf.build/grpc/grpc
 ";
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Config {
     version: String,
     modules: Vec<Module>,
@@ -183,7 +204,7 @@ struct Config {
     plugins: Vec<Plugin>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 struct Module {
     path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -212,7 +233,7 @@ struct Module {
     breaking: Option<BreakingConfig>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct LintConfig {
     #[serde(rename = "use", default, skip_serializing_if = "Vec::is_empty")]
     use_rules: Vec<String>,
@@ -220,11 +241,12 @@ struct LintConfig {
     except: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     ignore: Vec<String>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    ignore_only: HashMap<String, Vec<String>>,
+    /// Kept in file order, so that rewriting the file does not reorder it
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    ignore_only: IndexMap<String, Vec<String>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct BreakingConfig {
     #[serde(rename = "use", default, skip_serializing_if = "Vec::is_empty")]
     use_rules: Vec<String>,
@@ -236,16 +258,12 @@ struct BreakingConfig {
     disable_builtin: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Plugin {
     plugin: String,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    options: HashMap<String, String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct PluginOptions {
-    timestamp_suffix: Option<String>,
+    /// Kept in file order, so that rewriting the file does not reorder it
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    options: IndexMap<String, String>,
 }
 
 fn is_false(b: impl std::borrow::Borrow<bool>) -> bool {
@@ -259,8 +277,121 @@ mod tests {
 
     use super::*;
 
+    /// Seven top-level `ignore_only` keys and seven plugin options, deliberately
+    /// not in alphabetical order, so that a hash-ordered or sorted
+    /// serialisation matching the file order by luck is improbable.
+    const UNSORTED_MAPS_YAML: &str = r#"
+version: v2
+modules:
+  - path: "."
+    excludes:
+      - vendor
+    lint:
+      ignore_only:
+        SERVICE_SUFFIX:
+          - api/m
+        ENUM_ZERO_VALUE_SUFFIX:
+          - api/z
+lint:
+  use:
+    - STANDARD
+  ignore_only:
+    RPC_RESPONSE_STANDARD_NAME:
+      - api/a
+    PACKAGE_VERSION_SUFFIX:
+      - api/b
+    ENUM_VALUE_PREFIX:
+      - api/c
+    RPC_REQUEST_STANDARD_NAME:
+      - api/d
+    FIELD_LOWER_SNAKE_CASE:
+      - api/e
+    RPC_REQUEST_RESPONSE_UNIQUE:
+      - api/f
+    COMMENT_FIELD:
+      - api/g
+plugins:
+  - plugin: plugin-x
+    options:
+      zeta: "1"
+      alpha: "2"
+      mu: "3"
+      beta: "4"
+      omega: "5"
+      gamma: "6"
+      delta: "7"
+"#;
+
+    const LINT_IGNORE_ONLY_ORDER: [&str; 7] = [
+        "RPC_RESPONSE_STANDARD_NAME",
+        "PACKAGE_VERSION_SUFFIX",
+        "ENUM_VALUE_PREFIX",
+        "RPC_REQUEST_STANDARD_NAME",
+        "FIELD_LOWER_SNAKE_CASE",
+        "RPC_REQUEST_RESPONSE_UNIQUE",
+        "COMMENT_FIELD",
+    ];
+
+    const PLUGIN_OPTION_ORDER: [&str; 7] =
+        ["zeta", "alpha", "mu", "beta", "omega", "gamma", "delta"];
+
+    fn reserialize(yaml: &str) -> String {
+        let tmp_dir = TempDir::new().unwrap();
+        let store = PackageStore::new(tmp_dir.path().to_owned());
+        BufYamlFile::new_from_str(yaml, &store)
+            .unwrap()
+            .to_string()
+            .unwrap()
+    }
+
+    /// Keys of a YAML mapping, in document order.
+    fn keys_in_document_order(mapping: &serde_norway::Value) -> Vec<String> {
+        mapping
+            .as_mapping()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    fn parse(yaml: &str) -> serde_norway::Value {
+        serde_norway::from_str(yaml).unwrap()
+    }
+
     #[test]
-    fn test_gen_default_buf_yaml() {}
+    fn test_reserialized_ignore_only_keeps_file_order() {
+        // Each parse builds a fresh map; repeat to defeat a lucky hash order.
+        for _ in 0..8 {
+            let out = parse(&reserialize(UNSORTED_MAPS_YAML));
+            assert_eq!(
+                keys_in_document_order(&out["lint"]["ignore_only"]),
+                LINT_IGNORE_ONLY_ORDER
+            );
+            assert_eq!(
+                keys_in_document_order(&out["modules"][0]["lint"]["ignore_only"]),
+                ["SERVICE_SUFFIX", "ENUM_ZERO_VALUE_SUFFIX"]
+            );
+        }
+    }
+
+    #[test]
+    fn test_reserialized_plugin_options_keep_file_order() {
+        for _ in 0..8 {
+            let out = parse(&reserialize(UNSORTED_MAPS_YAML));
+            assert_eq!(
+                keys_in_document_order(&out["plugins"][0]["options"]),
+                PLUGIN_OPTION_ORDER
+            );
+        }
+    }
+
+    #[test]
+    fn test_reserializing_canonical_output_is_byte_identical() {
+        let first = reserialize(UNSORTED_MAPS_YAML);
+        for _ in 0..8 {
+            assert_eq!(reserialize(&first), first);
+        }
+    }
 
     #[test]
     fn test_new_from_str() {
