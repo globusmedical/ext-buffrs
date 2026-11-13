@@ -52,7 +52,27 @@ fn publish(
     version: &str,
     dependencies: &str,
 ) {
-    let package_dir = root.join(format!("{name}-{version}"));
+    publish_to(
+        root,
+        buffrs_home,
+        registry_url,
+        REPOSITORY,
+        (kind, name, version),
+        dependencies,
+    );
+}
+
+/// Like [`publish`], into the given repository. `package` is the kind, name and version.
+fn publish_to(
+    root: &Path,
+    buffrs_home: &Path,
+    registry_url: &str,
+    repository: &str,
+    package: (&str, &str, &str),
+    dependencies: &str,
+) {
+    let (kind, name, version) = package;
+    let package_dir = root.join(format!("{repository}-{name}-{version}"));
     std::fs::create_dir(&package_dir).unwrap();
     write_config(&package_dir);
     std::fs::write(
@@ -96,7 +116,7 @@ message Marker {{
             "--registry",
             registry_url,
             "--repository",
-            REPOSITORY,
+            repository,
         ])
         .env("BUFFRS_HOME", buffrs_home)
         .current_dir(&package_dir)
@@ -137,14 +157,22 @@ fn remove_cache(buffrs_home: &Path) {
 }
 
 fn remote(name: &str, version_req: &str, registry_url: &str) -> String {
+    remote_in(REPOSITORY, name, version_req, registry_url)
+}
+
+fn remote_in(repository: &str, name: &str, version_req: &str, registry_url: &str) -> String {
     format!(
-        r#"{name} = {{ version = "{version_req}", registry = "{registry_url}", repository = "{REPOSITORY}" }}"#
+        r#"{name} = {{ version = "{version_req}", registry = "{registry_url}", repository = "{repository}" }}"#
     )
 }
 
 /// Creates a consumer project with the given `[dependencies]` body and returns its directory.
 fn consumer(root: &Path, dependencies: &str) -> std::path::PathBuf {
-    let consumer_dir = root.join("consumer");
+    consumer_named(root, "consumer", dependencies)
+}
+
+fn consumer_named(root: &Path, directory: &str, dependencies: &str) -> std::path::PathBuf {
+    let consumer_dir = root.join(directory);
     std::fs::create_dir(&consumer_dir).unwrap();
     write_config(&consumer_dir);
     write_consumer_manifest(&consumer_dir, dependencies);
@@ -158,6 +186,19 @@ fn write_consumer_manifest(consumer_dir: &Path, dependencies: &str) {
         format!("edition = \"0.10\"\n\n[dependencies]\n{dependencies}\n"),
     )
     .unwrap();
+}
+
+fn read_lock(consumer_dir: &Path) -> String {
+    std::fs::read_to_string(consumer_dir.join("Proto.lock")).unwrap()
+}
+
+fn cache_files(buffrs_home: &Path) -> Vec<std::path::PathBuf> {
+    let mut files: Vec<_> = std::fs::read_dir(buffrs_home.join(".buffrs/cache"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    files.sort();
+    files
 }
 
 fn is_listing(path: &str) -> bool {
@@ -312,6 +353,9 @@ fn throttled_requests_are_retried() {
         // The first request is rejected three times before the registry serves it.
         let requests = probe.get_requests();
         assert_eq!(requests[..4], vec![requests[0].clone(); 4]);
+
+        // Every request, resent or not, travels over the one connection of the install.
+        assert_eq!(probe.connections(), 1);
         assert_eq!(locked_version(&consumer_dir, "lib-shared"), "0.1.1");
     });
 }
@@ -510,5 +554,380 @@ fn throttled_version_is_not_skipped_during_resolution() {
         probe.throttle_path("lib-shared-0.1.1.tgz");
         install_fails(&consumer_dir, &buffrs_home);
         assert!(!consumer_dir.join("Proto.lock").exists());
+    });
+}
+
+#[test]
+fn registry_url_with_a_trailing_slash_matches_the_lockfile() {
+    with_probed_test_registry(|registry_url, probe| {
+        let vfs = VirtualFileSystem::empty();
+        let buffrs_home = vfs.root().join("$HOME");
+        let root = vfs.root();
+
+        publish_api_with_two_lib_versions(&root, &buffrs_home, registry_url);
+        let consumer_dir = consumer(&root, &remote_by_alias("api-a", "^0.1"));
+        write_alias_config(&consumer_dir, "0.50", registry_url);
+        install(&consumer_dir, &buffrs_home);
+        let lock = read_lock(&consumer_dir);
+
+        // The config now spells the same registry with a trailing slash.
+        write_alias_config(&consumer_dir, "0.50", &format!("{registry_url}/"));
+
+        probe.clear();
+        install(&consumer_dir, &buffrs_home);
+        assert_eq!(probe.get_requests(), Vec::<String>::new());
+
+        remove_cache(&buffrs_home);
+        probe.clear();
+        install(&consumer_dir, &buffrs_home);
+        let mut requests = probe.get_requests();
+        requests.sort();
+        assert_eq!(
+            requests,
+            [
+                artifact_path("api-a", "0.1.0"),
+                artifact_path("lib-shared", "0.1.1")
+            ]
+        );
+        assert_eq!(lock, read_lock(&consumer_dir));
+    });
+}
+
+#[test]
+fn lockfile_with_a_trailing_slash_in_the_registry_url_is_current() {
+    with_probed_test_registry(|registry_url, probe| {
+        let vfs = VirtualFileSystem::empty();
+        let buffrs_home = vfs.root().join("$HOME");
+        let root = vfs.root();
+
+        publish_api_with_two_lib_versions(&root, &buffrs_home, registry_url);
+        let consumer_dir = consumer(&root, &remote("api-a", "^0.1", registry_url));
+        install(&consumer_dir, &buffrs_home);
+        let lock = read_lock(&consumer_dir);
+
+        let with_slash = lock.replace(
+            &format!("registry = \"{registry_url}\""),
+            &format!("registry = \"{registry_url}/\""),
+        );
+        assert_ne!(lock, with_slash);
+        std::fs::write(consumer_dir.join("Proto.lock"), with_slash).unwrap();
+
+        probe.clear();
+        install(&consumer_dir, &buffrs_home);
+        assert_eq!(probe.get_requests(), Vec::<String>::new());
+
+        // The lockfile is written back with the one spelling buffrs uses.
+        assert_eq!(lock, read_lock(&consumer_dir));
+    });
+}
+
+#[test]
+fn package_required_from_two_repositories_installs_from_the_lockfile() {
+    const MIRROR: &str = "mirror";
+
+    with_probed_test_registry(|registry_url, probe| {
+        let vfs = VirtualFileSystem::empty();
+        let buffrs_home = vfs.root().join("$HOME");
+        let root = vfs.root();
+
+        // lib-shared is in both repositories. api-a reaches it through lib-mid in the mirror,
+        // api-b directly in the main repository.
+        for repository in [REPOSITORY, MIRROR] {
+            for version in ["0.1.0", "0.1.1"] {
+                publish_to(
+                    &root,
+                    &buffrs_home,
+                    registry_url,
+                    repository,
+                    ("lib", "lib-shared", version),
+                    "",
+                );
+            }
+        }
+        publish(
+            &root,
+            &buffrs_home,
+            registry_url,
+            "lib",
+            "lib-mid",
+            "0.1.0",
+            &remote_in(MIRROR, "lib-shared", "^0.1", registry_url),
+        );
+        publish(
+            &root,
+            &buffrs_home,
+            registry_url,
+            "api",
+            "api-a",
+            "0.1.0",
+            &remote("lib-mid", "^0.1", registry_url),
+        );
+        publish(
+            &root,
+            &buffrs_home,
+            registry_url,
+            "api",
+            "api-b",
+            "0.1.0",
+            &remote("lib-shared", "^0.1", registry_url),
+        );
+
+        let consumer_dir = consumer(
+            &root,
+            &format!(
+                "{}\n{}",
+                remote("api-a", "^0.1", registry_url),
+                remote("api-b", "^0.1", registry_url)
+            ),
+        );
+        install(&consumer_dir, &buffrs_home);
+        let lock = read_lock(&consumer_dir);
+
+        // Lockfile current, packages cached: no request at all.
+        for _ in 0..3 {
+            probe.clear();
+            install(&consumer_dir, &buffrs_home);
+            assert_eq!(probe.get_requests(), Vec::<String>::new());
+            assert_eq!(lock, read_lock(&consumer_dir));
+        }
+
+        // Lockfile current, cache empty: one download per locked package and no listing.
+        remove_cache(&buffrs_home);
+        probe.clear();
+        install(&consumer_dir, &buffrs_home);
+        let requests = probe.get_requests();
+        assert!(
+            !requests.iter().any(|path| is_listing(path)),
+            "unexpected version listing in {requests:?}"
+        );
+        let names: Vec<_> = sorted_downloads(&requests)
+            .iter()
+            .map(|path| path.rsplit('/').next().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "api-a-0.1.0.tgz",
+                "api-b-0.1.0.tgz",
+                "lib-mid-0.1.0.tgz",
+                "lib-shared-0.1.1.tgz"
+            ]
+        );
+        assert_eq!(lock, read_lock(&consumer_dir));
+    });
+}
+
+#[test]
+fn dropped_connection_is_retried() {
+    with_probed_test_registry(|registry_url, probe| {
+        let vfs = VirtualFileSystem::empty();
+        let buffrs_home = vfs.root().join("$HOME");
+        let root = vfs.root();
+
+        publish_api_with_two_lib_versions(&root, &buffrs_home, registry_url);
+        let consumer_dir = consumer(&root, &remote("api-a", "^0.1", registry_url));
+        install(&consumer_dir, &buffrs_home);
+        let lock = read_lock(&consumer_dir);
+
+        // The registry closes the connection of the first download without answering.
+        remove_cache(&buffrs_home);
+        probe.clear();
+        probe.drop_next_connections(1);
+        install(&consumer_dir, &buffrs_home);
+
+        assert_eq!(
+            sorted_downloads(&probe.get_requests()),
+            [
+                artifact_path("api-a", "0.1.0"),
+                artifact_path("lib-shared", "0.1.1")
+            ]
+        );
+        assert_eq!(lock, read_lock(&consumer_dir));
+    });
+}
+
+#[test]
+fn stalled_request_times_out_and_is_retried() {
+    with_probed_test_registry(|registry_url, probe| {
+        let vfs = VirtualFileSystem::empty();
+        let buffrs_home = vfs.root().join("$HOME");
+        let root = vfs.root();
+
+        publish_api_with_two_lib_versions(&root, &buffrs_home, registry_url);
+        let consumer_dir = consumer(&root, &remote("api-a", "^0.1", registry_url));
+        install(&consumer_dir, &buffrs_home);
+
+        // The registry leaves the first download unanswered for longer than the timeout.
+        remove_cache(&buffrs_home);
+        probe.clear();
+        probe.stall_next(1);
+        crate::cli!()
+            .arg("install")
+            .env("BUFFRS_HOME", &buffrs_home)
+            .env("BUFFRS_HTTP_TIMEOUT", "1")
+            .current_dir(&consumer_dir)
+            .assert()
+            .success();
+
+        let requests = probe.get_requests();
+        assert_eq!(requests.len(), 3, "{requests:?}");
+        assert_eq!(requests[0], requests[1]);
+    });
+}
+
+/// The paths of `requests`, each with the number of times it was requested.
+fn request_counts(requests: &[String]) -> Vec<(String, usize)> {
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    for path in requests {
+        *counts.entry(path.clone()).or_default() += 1;
+    }
+    counts.into_iter().collect()
+}
+
+/// Installs from a current lockfile into an empty cache while the registry interrupts the body
+/// of the first download: it closes the connection part way, or with `stall` stays silent for
+/// longer than the timeout of one second.
+fn install_with_interrupted_download(stall: bool) {
+    with_probed_test_registry(|registry_url, probe| {
+        let vfs = VirtualFileSystem::empty();
+        let buffrs_home = vfs.root().join("$HOME");
+        let root = vfs.root();
+
+        publish_api_with_two_lib_versions(&root, &buffrs_home, registry_url);
+        let consumer_dir = consumer(&root, &remote("api-a", "^0.1", registry_url));
+        install(&consumer_dir, &buffrs_home);
+        let lock = read_lock(&consumer_dir);
+
+        remove_cache(&buffrs_home);
+        probe.clear();
+        if stall {
+            probe.stall_next_downloads(1);
+        } else {
+            probe.cut_off_next_downloads(1);
+        }
+        crate::cli!()
+            .arg("install")
+            .env("BUFFRS_HOME", &buffrs_home)
+            .env("BUFFRS_HTTP_TIMEOUT", "1")
+            .current_dir(&consumer_dir)
+            .assert()
+            .success();
+
+        // The interrupted download is sent again, and only that one.
+        let requests = probe.get_requests();
+        let counts = request_counts(&requests);
+        let resent: Vec<_> = counts.iter().filter(|(_, count)| *count > 1).collect();
+        assert_eq!(resent.len(), 1, "{requests:?}");
+        assert_eq!(resent[0].1, 2, "{requests:?}");
+        assert_eq!(
+            counts.into_iter().map(|(path, _)| path).collect::<Vec<_>>(),
+            [
+                artifact_path("api-a", "0.1.0"),
+                artifact_path("lib-shared", "0.1.1")
+            ]
+        );
+        assert_eq!(lock, read_lock(&consumer_dir));
+    });
+}
+
+#[test]
+fn download_cut_off_part_way_is_retried() {
+    install_with_interrupted_download(false);
+}
+
+#[test]
+fn download_stalled_part_way_times_out_and_is_retried() {
+    install_with_interrupted_download(true);
+}
+
+/// Installs, cuts every cache entry in half and installs again.
+fn install_with_truncated_cache(config_edition: &str) {
+    with_probed_test_registry(|registry_url, probe| {
+        let vfs = VirtualFileSystem::empty();
+        let buffrs_home = vfs.root().join("$HOME");
+        let root = vfs.root();
+
+        publish_api_with_two_lib_versions(&root, &buffrs_home, registry_url);
+        let consumer_dir = consumer(&root, &remote("api-a", "^0.1", registry_url));
+        write_config_text(&consumer_dir, &format!("edition = \"{config_edition}\"\n"));
+        install(&consumer_dir, &buffrs_home);
+        let lock = read_lock(&consumer_dir);
+        let lib_version = locked_version(&consumer_dir, "lib-shared");
+
+        for file in cache_files(&buffrs_home) {
+            let content = std::fs::read(&file).unwrap();
+            std::fs::write(&file, &content[..content.len() / 2]).unwrap();
+        }
+
+        // Each locked package is downloaded once, in place of its unreadable cache entry.
+        probe.clear();
+        install(&consumer_dir, &buffrs_home);
+        let requests = probe.get_requests();
+        assert!(
+            !requests.iter().any(|path| is_listing(path)),
+            "unexpected version listing in {requests:?}"
+        );
+        assert_eq!(
+            sorted_downloads(&requests),
+            [
+                artifact_path("api-a", "0.1.0"),
+                artifact_path("lib-shared", &lib_version)
+            ]
+        );
+        assert_eq!(lock, read_lock(&consumer_dir));
+
+        // The downloads replaced the truncated entries.
+        probe.clear();
+        install(&consumer_dir, &buffrs_home);
+        assert_eq!(probe.get_requests(), Vec::<String>::new());
+    });
+}
+
+#[test]
+fn truncated_cache_entry_is_downloaded_again() {
+    install_with_truncated_cache("0.50");
+}
+
+#[test]
+fn legacy_resolver_downloads_a_truncated_cache_entry_again() {
+    install_with_truncated_cache("0.10");
+}
+
+#[test]
+fn parallel_installs_share_one_cache() {
+    const INSTALLS: usize = 6;
+
+    with_probed_test_registry(|registry_url, _| {
+        let vfs = VirtualFileSystem::empty();
+        let buffrs_home = vfs.root().join("$HOME");
+        let root = vfs.root();
+
+        publish_api_with_two_lib_versions(&root, &buffrs_home, registry_url);
+        let dependencies = remote("api-a", "^0.1", registry_url);
+        let consumer_dirs: Vec<_> = (0..INSTALLS)
+            .map(|index| consumer_named(&root, &format!("consumer-{index}"), &dependencies))
+            .collect();
+
+        install(&consumer_dirs[0], &buffrs_home);
+        let lock = read_lock(&consumer_dirs[0]);
+        for consumer_dir in &consumer_dirs[1..] {
+            std::fs::write(consumer_dir.join("Proto.lock"), &lock).unwrap();
+        }
+
+        remove_cache(&buffrs_home);
+        std::thread::scope(|scope| {
+            for consumer_dir in &consumer_dirs {
+                scope.spawn(|| install(consumer_dir, &buffrs_home));
+            }
+        });
+
+        for consumer_dir in &consumer_dirs {
+            assert_eq!(lock, read_lock(consumer_dir));
+            assert!(consumer_dir.join("proto/vendor/lib-shared").is_dir());
+        }
+
+        // One entry per package, and no temporary file left behind.
+        let cache = cache_files(&buffrs_home);
+        assert_eq!(cache.len(), 2, "{cache:?}");
     });
 }
