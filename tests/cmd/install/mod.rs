@@ -1,3 +1,4 @@
+mod buf_yaml;
 mod dependants_lock;
 mod empty;
 mod local;

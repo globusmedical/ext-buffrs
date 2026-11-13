@@ -53,3 +53,17 @@ automatically selected and locked.
 
 Transitive dependencies are also managed by the current project's lockfile. Even
 if dependencies provide their own lockfile, those won't be used.
+
+#### Generating `buf.yaml`
+
+`buffrs install --generate-buf-yaml` writes `proto/buf.yaml` with one module
+for the package's own protos (excluding `vendor`) and one module per installed
+dependency under `proto/vendor`. If the file exists, its other settings
+(`deps`, `lint`, `breaking`, `plugins`) are kept, and map entries such as
+`lint.ignore_only` keep the order they have in the file.
+
+If the module list already matches the installed dependencies, the file is
+left untouched. Otherwise it is rewritten in a normalised form: comments are
+not kept, and quoting may change (for example `path: "."` becomes
+`path: .`). Running the command again on the rewritten file does not change
+it.
