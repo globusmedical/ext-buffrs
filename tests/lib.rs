@@ -13,7 +13,7 @@ use pretty_assertions::{assert_eq, assert_str_eq};
 mod cmd;
 mod test_registry;
 
-pub use test_registry::with_test_registry;
+pub use test_registry::{with_probed_test_registry, with_test_registry};
 
 /// Create a command which runs the cli
 #[macro_export]

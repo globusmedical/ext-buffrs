@@ -22,6 +22,7 @@ use miette::{ensure, miette, Context, IntoDiagnostic};
 use reqwest::{Body, Method, Response};
 use semver::Version;
 use serde::Deserialize;
+use std::time::Duration;
 use url::Url;
 
 /// The policy for validating artifactory server certificates
@@ -275,7 +276,21 @@ impl Artifactory {
         name: &PackageName,
         version: &Version,
     ) -> miette::Result<Package> {
+        self.try_download_version(repository, name, version)
+            .await
+            .map_err(DownloadFailure::into_report)
+    }
+
+    /// Like [`Self::download_version`], and tells a missing artifact and a throttled request
+    /// apart from every other failure.
+    pub(crate) async fn try_download_version(
+        &self,
+        repository: &str,
+        name: &PackageName,
+        version: &Version,
+    ) -> Result<Package, DownloadFailure> {
         use crate::version::version_to_artifact_string;
+        use reqwest::StatusCode;
 
         let artifact_url = {
             let version_str = version_to_artifact_string(version);
@@ -292,25 +307,45 @@ impl Artifactory {
 
         tracing::debug!("Hitting download URL: {artifact_url}");
 
-        let response = self.new_request(Method::GET, artifact_url).send().await?;
-        let response: reqwest::Response = response.0;
-        let headers = response.headers();
-        let content_type = headers
+        let response = self
+            .new_request(Method::GET, artifact_url)
+            .send_raw()
+            .await
+            .map_err(DownloadFailure::Other)?;
+        let status = response.status();
+        let response = match ValidatedResponse::try_from(response) {
+            Ok(response) => response.0,
+            Err(e) if status == StatusCode::NOT_FOUND || status == StatusCode::GONE => {
+                return Err(DownloadFailure::NotFound(e))
+            }
+            Err(e) if is_throttled(status) => return Err(DownloadFailure::Throttled(e)),
+            Err(e) => return Err(DownloadFailure::Other(e)),
+        };
+
+        let content_type = response
+            .headers()
             .get(&reqwest::header::CONTENT_TYPE)
-            .ok_or_else(|| miette!("missing content-type header"))?;
+            .ok_or_else(|| DownloadFailure::Other(miette!("missing content-type header")))?;
 
-        ensure!(
-            content_type == reqwest::header::HeaderValue::from_static("application/x-gzip"),
-            "server response has incorrect mime type: {content_type:?}"
-        );
+        if content_type != reqwest::header::HeaderValue::from_static("application/x-gzip") {
+            return Err(DownloadFailure::Other(miette!(
+                "server response has incorrect mime type: {content_type:?}"
+            )));
+        }
 
-        let data = response.bytes().await.into_diagnostic()?;
+        let data = response
+            .bytes()
+            .await
+            .into_diagnostic()
+            .map_err(DownloadFailure::Other)?;
 
-        Package::try_from(data).wrap_err(miette!(
-            "failed to download dependency {}@{}",
-            name,
-            version
-        ))
+        Package::try_from(data)
+            .wrap_err(miette!(
+                "failed to download dependency {}@{}",
+                name,
+                version
+            ))
+            .map_err(DownloadFailure::Other)
     }
 
     /// Downloads a package from artifactory.
@@ -462,13 +497,125 @@ impl RequestBuilder {
     }
 
     async fn send(self) -> miette::Result<ValidatedResponse> {
-        self.0.send().await.into_diagnostic()?.try_into()
+        self.send_with_retry().await?.try_into()
     }
 
     /// Send request and return raw response without validation.
     /// Used for checking artifact existence where 404 is an expected outcome.
     async fn send_raw(self) -> miette::Result<reqwest::Response> {
-        self.0.send().await.into_diagnostic()
+        self.send_with_retry().await
+    }
+
+    /// Sends the request, waiting and resending while the registry throttles it.
+    ///
+    /// A registry behind a rate limiter answers 429 (or 503 while overloaded) to a burst of
+    /// requests, which several concurrent installs from one address produce. The request is
+    /// resent up to [`MAX_SEND_ATTEMPTS`] times in total and for at most
+    /// [`MAX_TOTAL_RETRY_WAIT`]; after that the throttled response is returned as is. A request
+    /// whose body cannot be replayed is sent once.
+    async fn send_with_retry(self) -> miette::Result<reqwest::Response> {
+        let mut attempt = 1;
+        let mut waited = Duration::ZERO;
+
+        loop {
+            let Some(request) = self.0.try_clone() else {
+                return self.0.send().await.into_diagnostic();
+            };
+
+            let response = request.send().await.into_diagnostic()?;
+
+            if !is_throttled(response.status()) || attempt >= MAX_SEND_ATTEMPTS {
+                return Ok(response);
+            }
+
+            let Some(delay) = retry_delay(response.headers(), attempt)
+                .filter(|delay| waited + *delay <= MAX_TOTAL_RETRY_WAIT)
+            else {
+                return Ok(response);
+            };
+
+            tracing::warn!(
+                "registry answered {} for {}, retrying in {:.1}s (attempt {attempt} of {MAX_SEND_ATTEMPTS})",
+                response.status(),
+                response.url(),
+                delay.as_secs_f64()
+            );
+
+            tokio::time::sleep(delay).await;
+            waited += delay;
+            attempt += 1;
+        }
+    }
+}
+
+/// Total number of times a throttled request is sent before its response is returned as is.
+const MAX_SEND_ATTEMPTS: u32 = 6;
+
+/// Longest `Retry-After` the client waits for. A longer cooldown ends the retries.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
+
+/// Shortest wait before a resend, used when the registry sends `Retry-After: 0`.
+const MIN_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+/// Longest time one request spends waiting between its attempts.
+const MAX_TOTAL_RETRY_WAIT: Duration = Duration::from_secs(120);
+
+/// Whether the status asks the client to slow down and try again.
+fn is_throttled(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+}
+
+/// Time to wait before resending after the given attempt (1-based).
+///
+/// A `Retry-After` header given in seconds is never shortened, so the request is not resent
+/// before the cooldown the registry asked for. `None` means that cooldown exceeds
+/// [`MAX_RETRY_AFTER`] and the request should not be resent. Without the header, or with one
+/// given as an HTTP date, the wait doubles from one second per attempt. Every wait gets up to
+/// 50% jitter on top so that concurrent installs spread out.
+fn retry_delay(headers: &reqwest::header::HeaderMap, attempt: u32) -> Option<Duration> {
+    let retry_after = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs);
+
+    let base = match retry_after {
+        Some(retry_after) if retry_after > MAX_RETRY_AFTER => return None,
+        Some(retry_after) => retry_after.max(MIN_RETRY_DELAY),
+        None => Duration::from_secs(1) * 2u32.saturating_pow(attempt.saturating_sub(1)),
+    };
+
+    Some(base + base.mul_f64(0.5 * jitter_fraction()))
+}
+
+/// A pseudo-random value in `[0, 1)`, seeded per call by the standard library's hasher.
+fn jitter_fraction() -> f64 {
+    use std::hash::{BuildHasher, Hasher};
+
+    let random = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
+
+    (random % 1000) as f64 / 1000.0
+}
+
+/// Why a version download failed.
+pub(crate) enum DownloadFailure {
+    /// The registry does not have the artifact (404 or 410).
+    NotFound(miette::Report),
+    /// The registry still throttled the request after all retries.
+    Throttled(miette::Report),
+    /// Any other failure, such as missing credentials, a transport error or a broken archive.
+    Other(miette::Report),
+}
+
+impl DownloadFailure {
+    /// The underlying error.
+    pub(crate) fn into_report(self) -> miette::Report {
+        match self {
+            Self::NotFound(report) | Self::Throttled(report) | Self::Other(report) => report,
+        }
     }
 }
 
@@ -501,4 +648,62 @@ struct StorageFolderInfo {
 struct StorageChild {
     uri: String,
     folder: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+    use reqwest::StatusCode;
+
+    fn retry_after(value: &'static str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static(value));
+        headers
+    }
+
+    #[test]
+    fn retry_after_is_never_shortened() {
+        let delay = retry_delay(&retry_after("45"), 1).unwrap();
+
+        assert!(delay >= Duration::from_secs(45), "{delay:?}");
+        assert!(delay <= Duration::from_millis(67_500), "{delay:?}");
+    }
+
+    #[test]
+    fn retry_after_of_zero_still_waits() {
+        let delay = retry_delay(&retry_after("0"), 1).unwrap();
+
+        assert!(delay >= MIN_RETRY_DELAY, "{delay:?}");
+        assert!(delay <= MIN_RETRY_DELAY.mul_f64(1.5), "{delay:?}");
+    }
+
+    #[test]
+    fn retry_after_beyond_the_limit_ends_the_retries() {
+        assert!(retry_delay(&retry_after("60"), 1).is_some());
+        assert_eq!(retry_delay(&retry_after("61"), 1), None);
+    }
+
+    #[test]
+    fn backoff_doubles_without_a_usable_header() {
+        let http_date = retry_after("Wed, 21 Oct 2026 07:28:00 GMT");
+
+        for headers in [HeaderMap::new(), http_date] {
+            for attempt in 1..MAX_SEND_ATTEMPTS {
+                let base = Duration::from_secs(1) * 2u32.pow(attempt - 1);
+                let delay = retry_delay(&headers, attempt).unwrap();
+
+                assert!(delay >= base, "attempt {attempt}: {delay:?}");
+                assert!(delay <= base.mul_f64(1.5), "attempt {attempt}: {delay:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn only_429_and_503_are_throttling() {
+        assert!(is_throttled(StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_throttled(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(!is_throttled(StatusCode::NOT_FOUND));
+        assert!(!is_throttled(StatusCode::INTERNAL_SERVER_ERROR));
+    }
 }

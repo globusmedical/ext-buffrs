@@ -3,5 +3,6 @@ mod empty;
 mod local;
 mod local_transitive;
 mod local_transitive_pubgrub;
+mod locked;
 mod multiversion;
 mod upgrade;

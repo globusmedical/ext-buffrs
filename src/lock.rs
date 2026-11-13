@@ -307,7 +307,7 @@ impl Lockfile {
                 return false;
             }
             if let Some(registry) = registry {
-                if &p.registry != registry {
+                if !p.registry.same_registry(registry) {
                     return false;
                 }
             }

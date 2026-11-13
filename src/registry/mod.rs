@@ -23,6 +23,7 @@ mod cache;
 
 use crate::manifest::DependencyManifest;
 use crate::{config, manifest::Dependency};
+pub(crate) use artifactory::DownloadFailure;
 pub use artifactory::{build_reqwest_client, Artifactory, CertValidationPolicy, ENV_CA_BUNDLE};
 use miette::{ensure, miette, Context, IntoDiagnostic};
 use semver::VersionReq;
@@ -103,6 +104,27 @@ impl RegistryRef {
                 None => Ok(self.clone()),
             },
             _ => Ok(self.clone()),
+        }
+    }
+
+    /// The URL of the registry, if this reference carries one.
+    #[must_use]
+    pub(crate) fn url(&self) -> Option<&RegistryUri> {
+        match self {
+            RegistryRef::Url(url) | RegistryRef::ResolvedAlias { url, .. } => Some(url),
+            RegistryRef::Alias(_) | RegistryRef::UseDefault => None,
+        }
+    }
+
+    /// Whether both references name the same registry.
+    ///
+    /// A resolved alias equals the URL it resolves to, which is how `Proto.lock` stores it.
+    /// References without a URL are compared as written.
+    #[must_use]
+    pub(crate) fn same_registry(&self, other: &Self) -> bool {
+        match (self.url(), other.url()) {
+            (Some(url), Some(other_url)) => url == other_url,
+            _ => self == other,
         }
     }
 
@@ -441,5 +463,33 @@ mod tests {
         // If the URL inside parens is invalid, fall back to Alias
         let reg = RegistryRef::from_str("name (not-a-url)").unwrap();
         assert!(matches!(reg, RegistryRef::Alias(_)));
+    }
+
+    #[test]
+    fn same_registry_compares_resolved_urls() {
+        let url = |value: &str| super::RegistryUri::from_str(value).unwrap();
+        let alias = RegistryRef::ResolvedAlias {
+            alias: "globus".to_owned(),
+            url: url("https://registry.example.com/artifactory"),
+        };
+
+        assert!(alias.same_registry(&RegistryRef::Url(url(
+            "https://registry.example.com/artifactory"
+        ))));
+        assert!(!alias.same_registry(&RegistryRef::Url(url(
+            "https://other.example.com/artifactory"
+        ))));
+    }
+
+    #[test]
+    fn same_registry_compares_unresolved_references_as_written() {
+        let alias = RegistryRef::Alias("globus".to_owned());
+        let url = RegistryRef::Url(
+            super::RegistryUri::from_str("https://registry.example.com/artifactory").unwrap(),
+        );
+
+        assert!(alias.same_registry(&RegistryRef::Alias("globus".to_owned())));
+        assert!(!alias.same_registry(&url));
+        assert!(!alias.same_registry(&RegistryRef::UseDefault));
     }
 }

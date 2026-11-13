@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use axum::{
     extract::{Extension, Path, Query, State},
     http::{header, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::get,
     Json, Router,
 };
@@ -17,8 +18,63 @@ use tokio::net::TcpListener;
 
 type AppState = Arc<RwLock<HashMap<String, Bytes>>>;
 
+/// What a test can observe and control on the test registry.
+#[derive(Default)]
+pub struct RegistryProbe {
+    /// Paths of the GET requests served so far, in order.
+    get_requests: Mutex<Vec<String>>,
+    /// Number of upcoming GET requests to reject with 429.
+    throttled: AtomicUsize,
+    /// Path fragments whose GET requests are always rejected with 429.
+    throttled_paths: Mutex<Vec<String>>,
+    /// Paths the registry pretends not to have.
+    hidden: Mutex<Vec<String>>,
+}
+
+impl RegistryProbe {
+    /// Paths of the GET requests received since the last call to [`Self::clear`].
+    pub fn get_requests(&self) -> Vec<String> {
+        self.get_requests.lock().unwrap().clone()
+    }
+
+    /// Forgets the recorded requests.
+    pub fn clear(&self) {
+        self.get_requests.lock().unwrap().clear();
+    }
+
+    /// Rejects the next `count` GET requests with `429 Too Many Requests`.
+    pub fn throttle_next(&self, count: usize) {
+        self.throttled.store(count, Ordering::SeqCst);
+    }
+
+    /// Rejects every GET request whose path contains `fragment` with `429 Too Many Requests`.
+    pub fn throttle_path(&self, fragment: &str) {
+        self.throttled_paths
+            .lock()
+            .unwrap()
+            .push(fragment.to_owned());
+    }
+
+    /// Makes the registry answer as if the artifact at `path` had been deleted.
+    pub fn hide(&self, path: &str) {
+        self.hidden.lock().unwrap().push(path.to_owned());
+    }
+
+    fn is_hidden(&self, path: &str) -> bool {
+        self.hidden
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|hidden| hidden == path)
+    }
+}
+
 /// Run a minimal registry for local testing
-async fn test_registry(listener: TcpListener, base_url: String) -> miette::Result<()> {
+async fn test_registry(
+    listener: TcpListener,
+    base_url: String,
+    probe: Arc<RegistryProbe>,
+) -> miette::Result<()> {
     let state = Arc::new(RwLock::new(HashMap::<String, Bytes>::new()));
     let app = Router::new()
         .route("/artifactory/api/search/artifact", get(search_artifacts))
@@ -27,7 +83,8 @@ async fn test_registry(listener: TcpListener, base_url: String) -> miette::Resul
             get(get_package).head(head_package).put(put_package),
         )
         .with_state(state)
-        .layer(Extension(base_url));
+        .layer(Extension(base_url))
+        .layer(Extension(probe));
     axum::serve(listener, app)
         .await
         .into_diagnostic()
@@ -83,25 +140,81 @@ async fn search_artifacts(
     )
 }
 
-// basic handler that responds with a static string
+/// Serves a package, or the Artifactory storage listing of a package folder for
+/// `GET {registry}/api/storage/{repository}/{name}/`.
 async fn get_package(
     State(state): State<AppState>,
+    Extension(probe): Extension<Arc<RegistryProbe>>,
     Path(path): Path<String>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Response {
+    probe.get_requests.lock().unwrap().push(path.clone());
+
+    let throttled = probe
+        .throttled
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+        .is_ok()
+        || probe
+            .throttled_paths
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|fragment| path.contains(fragment));
+    if throttled {
+        return (StatusCode::TOO_MANY_REQUESTS, [(header::RETRY_AFTER, "0")]).into_response();
+    }
+
+    if let Some((registry, folder)) = path.split_once("/api/storage/") {
+        let prefix = format!("{registry}/{folder}");
+        let children: Vec<StorageChild> = state
+            .read()
+            .unwrap()
+            .keys()
+            .filter(|key| !probe.is_hidden(key))
+            .filter_map(|key| key.strip_prefix(&prefix))
+            .map(|file| StorageChild {
+                uri: format!("/{file}"),
+                folder: false,
+            })
+            .collect();
+
+        if children.is_empty() {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+
+        return Json(StorageFolder { children }).into_response();
+    }
+
+    if probe.is_hidden(&path) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
     tracing::info!("Downloaded package from {path}");
-    let content = state
-        .read()
-        .unwrap()
-        .get(&path)
-        .cloned()
-        .ok_or(StatusCode::NOT_FOUND)?;
-    Ok(([(header::CONTENT_TYPE, "application/x-gzip")], content))
+    match state.read().unwrap().get(&path).cloned() {
+        Some(content) => ([(header::CONTENT_TYPE, "application/x-gzip")], content).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// Artifactory storage API folder listing
+#[derive(Serialize)]
+struct StorageFolder {
+    children: Vec<StorageChild>,
+}
+
+#[derive(Serialize)]
+struct StorageChild {
+    uri: String,
+    folder: bool,
 }
 
 /// HEAD handler: returns 200 if artifact exists, 404 otherwise (no body)
-async fn head_package(State(state): State<AppState>, Path(path): Path<String>) -> StatusCode {
+async fn head_package(
+    State(state): State<AppState>,
+    Extension(probe): Extension<Arc<RegistryProbe>>,
+    Path(path): Path<String>,
+) -> StatusCode {
     tracing::info!("HEAD check for {path}");
-    if state.read().unwrap().contains_key(&path) {
+    if state.read().unwrap().contains_key(&path) && !probe.is_hidden(&path) {
         StatusCode::OK
     } else {
         StatusCode::NOT_FOUND
@@ -116,12 +229,28 @@ async fn put_package(State(state): State<AppState>, Path(path): Path<String>, bo
 // do not use (flavor = "current_thread") here because the user-provided function is blocking
 #[tokio::main]
 pub async fn with_test_registry<F: FnOnce(&str)>(f: F) {
+    run_with_test_registry(|url, _| f(url)).await;
+}
+
+/// Like [`with_test_registry`], and also hands the test a [`RegistryProbe`].
+// do not use (flavor = "current_thread") here because the user-provided function is blocking
+#[tokio::main]
+pub async fn with_probed_test_registry<F: FnOnce(&str, &RegistryProbe)>(f: F) {
+    run_with_test_registry(f).await;
+}
+
+async fn run_with_test_registry<F: FnOnce(&str, &RegistryProbe)>(f: F) {
     // spawn test registry in separate Tokio task
     let listen = SocketAddr::new("127.0.0.1".parse().unwrap(), 0);
     let listener = TcpListener::bind(listen).await.unwrap();
     let local_addr = listener.local_addr().unwrap();
     let base_url = format!("http://{local_addr}");
-    let handle = tokio::task::spawn(test_registry(listener, base_url.clone()));
+    let probe = Arc::new(RegistryProbe::default());
+    let handle = tokio::task::spawn(test_registry(
+        listener,
+        base_url.clone(),
+        Arc::clone(&probe),
+    ));
 
     tracing::info!("Listening on {local_addr:?}");
     let url = format!("{base_url}/registry");
@@ -143,6 +272,9 @@ pub async fn with_test_registry<F: FnOnce(&str)>(f: F) {
         tokio::time::sleep(dur).await;
     }
 
+    // the readiness probe above is not part of what a test observes
+    probe.clear();
+
     // run user code
-    f(&url);
+    f(&url, &probe);
 }
