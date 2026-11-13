@@ -32,10 +32,27 @@ use thiserror::Error;
 use url::Url;
 
 /// A representation of a registry URI
-#[derive(Debug, Clone, Hash, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+///
+/// The path never ends in a slash, except for the root path: `https://host/artifactory/` and
+/// `https://host/artifactory` are the same registry and are stored, compared and printed as the
+/// latter.
+#[derive(Debug, Clone, Hash, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RegistryUri(Url);
 
 impl RegistryUri {
+    /// Wraps the URL after removing the trailing slashes of its path.
+    fn normalized(mut url: Url) -> Self {
+        let path = url.path();
+        let trimmed = path.trim_end_matches('/');
+
+        if !trimmed.is_empty() && trimmed.len() != path.len() {
+            let trimmed = trimmed.to_owned();
+            url.set_path(&trimmed);
+        }
+
+        Self(url)
+    }
+
     /// Get the host component of the registry URI
     #[must_use]
     pub fn host(&self) -> Option<&str> {
@@ -140,6 +157,15 @@ impl RegistryRef {
                 "cannot serialize unresolved alias",
             )),
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for RegistryUri {
+    fn deserialize<D>(deserializer: D) -> Result<RegistryUri, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Url::deserialize(deserializer).map(Self::normalized)
     }
 }
 
@@ -248,9 +274,11 @@ impl FromStr for RegistryUri {
             .into_diagnostic()
             .wrap_err(miette!("not a valid URL: {value}"))?;
 
-        sanity_check_url(&url)?;
+        let uri = Self::normalized(url);
 
-        Ok(Self(url))
+        sanity_check_url(&uri.0)?;
+
+        Ok(uri)
     }
 }
 
@@ -479,6 +507,62 @@ mod tests {
         assert!(!alias.same_registry(&RegistryRef::Url(url(
             "https://other.example.com/artifactory"
         ))));
+    }
+
+    #[test]
+    fn trailing_slash_names_the_same_registry() {
+        let url = |value: &str| super::RegistryUri::from_str(value).unwrap();
+        let plain = url("https://registry.example.com/artifactory");
+        let slash = url("https://registry.example.com/artifactory/");
+
+        assert_eq!(plain, slash);
+        assert_eq!(
+            slash.to_string(),
+            "https://registry.example.com/artifactory"
+        );
+        assert_eq!(slash.path(), "/artifactory");
+        assert!(RegistryRef::Url(plain.clone()).same_registry(&RegistryRef::Url(slash.clone())));
+
+        let tokens = std::collections::HashMap::from([(slash, "token")]);
+        assert_eq!(tokens.get(&plain), Some(&"token"));
+    }
+
+    #[test]
+    fn deserialized_registry_uri_has_no_trailing_slash() {
+        let uri: super::RegistryUri =
+            serde_json::from_str("\"https://registry.example.com/artifactory//\"").unwrap();
+
+        assert_eq!(
+            uri,
+            super::RegistryUri::from_str("https://registry.example.com/artifactory").unwrap()
+        );
+        assert_eq!(
+            serde_json::to_string(&uri).unwrap(),
+            "\"https://registry.example.com/artifactory\""
+        );
+    }
+
+    #[test]
+    fn registry_at_the_root_path_keeps_its_slash() {
+        let url = |value: &str| super::RegistryUri::from_str(value).unwrap();
+
+        assert_eq!(
+            url("https://registry.example.com"),
+            url("https://registry.example.com/")
+        );
+        assert_eq!(
+            url("https://registry.example.com").to_string(),
+            "https://registry.example.com/"
+        );
+        assert_eq!(url("https://registry.example.com").path(), "/");
+    }
+
+    #[test]
+    fn jfrog_url_may_end_in_a_slash() {
+        let uri = super::RegistryUri::from_str("https://acme.jfrog.io/artifactory/").unwrap();
+
+        assert_eq!(uri.to_string(), "https://acme.jfrog.io/artifactory");
+        assert!(super::RegistryUri::from_str("https://acme.jfrog.io/other/").is_err());
     }
 
     #[test]

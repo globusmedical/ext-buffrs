@@ -22,7 +22,7 @@ use miette::{ensure, miette, Context, IntoDiagnostic};
 use reqwest::{Body, Method, Response};
 use semver::Version;
 use serde::Deserialize;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use url::Url;
 
 /// The policy for validating artifactory server certificates
@@ -55,10 +55,91 @@ pub const ENV_CA_BUNDLE: &str = "BUFFRS_CA_BUNDLE";
 /// - Custom PKI setups
 ///
 /// If `BUFFRS_CA_BUNDLE` is set but the file cannot be read, an error is returned.
+///
+/// # Timeouts
+///
+/// Connecting to the registry is given up after 30 seconds. A request fails when the registry
+/// sends nothing for 60 seconds, counted from the start of the request until the response
+/// headers arrive and between two reads of the response body. A download of any size therefore
+/// continues for as long as data arrives, while an upload has to be answered within the limit.
+///
+/// `BUFFRS_HTTP_CONNECT_TIMEOUT` and `BUFFRS_HTTP_TIMEOUT` override the two limits with a number
+/// of seconds, and `0` removes the limit. Any other value is an error.
 pub fn build_reqwest_client(policy: CertValidationPolicy) -> miette::Result<reqwest::Client> {
+    let variable = |name: &str| std::env::var(name).ok();
+
+    let timeouts = HttpTimeouts {
+        connect: timeout_setting(
+            ENV_HTTP_CONNECT_TIMEOUT,
+            variable(ENV_HTTP_CONNECT_TIMEOUT).as_deref(),
+            DEFAULT_CONNECT_TIMEOUT,
+        )?,
+        read: timeout_setting(
+            ENV_HTTP_TIMEOUT,
+            variable(ENV_HTTP_TIMEOUT).as_deref(),
+            DEFAULT_READ_TIMEOUT,
+        )?,
+    };
+
+    build_client(policy, timeouts)
+}
+
+/// Environment variable for the connect timeout of registry requests, in seconds
+const ENV_HTTP_CONNECT_TIMEOUT: &str = "BUFFRS_HTTP_CONNECT_TIMEOUT";
+
+/// Environment variable for the read timeout of registry requests, in seconds
+const ENV_HTTP_TIMEOUT: &str = "BUFFRS_HTTP_TIMEOUT";
+
+/// Time allowed for connecting to the registry unless the environment overrides it.
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Time the registry may stay silent during a request unless the environment overrides it.
+const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The time limits of a registry client. `None` is no limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HttpTimeouts {
+    /// Time allowed for establishing a connection.
+    connect: Option<Duration>,
+    /// Time allowed for the response headers to arrive, and between two reads of the body.
+    read: Option<Duration>,
+}
+
+/// The timeout that the environment variable `name` with the given value selects.
+///
+/// An unset or empty variable selects `default`, `0` selects no timeout, and any other number is
+/// a timeout in seconds.
+fn timeout_setting(
+    name: &str,
+    value: Option<&str>,
+    default: Duration,
+) -> miette::Result<Option<Duration>> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(Some(default));
+    };
+
+    let seconds: u64 = value.parse().into_diagnostic().wrap_err(miette!(
+        "{name} must be a number of seconds, got \"{value}\""
+    ))?;
+
+    Ok((seconds > 0).then(|| Duration::from_secs(seconds)))
+}
+
+fn build_client(
+    policy: CertValidationPolicy,
+    timeouts: HttpTimeouts,
+) -> miette::Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .danger_accept_invalid_certs(policy == CertValidationPolicy::NoValidation);
+
+    if let Some(timeout) = timeouts.connect {
+        builder = builder.connect_timeout(timeout);
+    }
+
+    if let Some(timeout) = timeouts.read {
+        builder = builder.read_timeout(timeout);
+    }
 
     // Check for custom CA bundle from environment variable
     if let Ok(ca_bundle_path) = std::env::var(ENV_CA_BUNDLE) {
@@ -141,7 +222,7 @@ impl Artifactory {
     }
 
     fn new_request(&self, method: Method, url: Url) -> RequestBuilder {
-        let mut request_builder = RequestBuilder::new(self.client.clone(), method, url);
+        let mut request_builder = RequestBuilder::new(&self.client, method, url);
 
         if let Some(token) = &self.token {
             request_builder = request_builder.auth(token.clone());
@@ -479,20 +560,26 @@ impl Artifactory {
     }
 }
 
-struct RequestBuilder(reqwest::RequestBuilder);
+struct RequestBuilder {
+    request: reqwest::RequestBuilder,
+    method: Method,
+}
 
 impl RequestBuilder {
-    fn new(client: reqwest::Client, method: reqwest::Method, url: Url) -> Self {
-        Self(client.request(method, url))
+    fn new(client: &reqwest::Client, method: Method, url: Url) -> Self {
+        Self {
+            request: client.request(method.clone(), url),
+            method,
+        }
     }
 
     fn auth(mut self, token: String) -> Self {
-        self.0 = self.0.bearer_auth(token);
+        self.request = self.request.bearer_auth(token);
         self
     }
 
     fn body(mut self, payload: impl Into<Body>) -> Self {
-        self.0 = self.0.body(payload);
+        self.request = self.request.body(payload);
         self
     }
 
@@ -506,49 +593,72 @@ impl RequestBuilder {
         self.send_with_retry().await
     }
 
-    /// Sends the request, waiting and resending while the registry throttles it.
+    /// Sends the request, waiting and resending while the registry throttles it or cannot be
+    /// reached.
     ///
     /// A registry behind a rate limiter answers 429 (or 503 while overloaded) to a burst of
-    /// requests, which several concurrent installs from one address produce. The request is
-    /// resent up to [`MAX_SEND_ATTEMPTS`] times in total and for at most
-    /// [`MAX_TOTAL_RETRY_WAIT`]; after that the throttled response is returned as is. A request
-    /// whose body cannot be replayed is sent once.
+    /// requests, which several concurrent installs from one address produce, and a busy registry
+    /// or network drops or stalls connections. The request is sent up to [`MAX_SEND_ATTEMPTS`]
+    /// times in total, and not again once [`MAX_TOTAL_RETRY_WAIT`] has passed since it was first
+    /// sent; after that the last response or error is returned as is. [`is_retryable`] decides
+    /// which failures are resent. A request whose body cannot be replayed is sent once.
     async fn send_with_retry(self) -> miette::Result<reqwest::Response> {
+        let started = tokio::time::Instant::now();
         let mut attempt = 1;
-        let mut waited = Duration::ZERO;
 
         loop {
-            let Some(request) = self.0.try_clone() else {
-                return self.0.send().await.into_diagnostic();
+            let Some(request) = self.request.try_clone() else {
+                return self.request.send().await.into_diagnostic();
             };
 
-            let response = request.send().await.into_diagnostic()?;
+            let outcome = request.send().await;
 
-            if !is_throttled(response.status()) || attempt >= MAX_SEND_ATTEMPTS {
-                return Ok(response);
+            let delay = match &outcome {
+                Ok(response) if is_throttled(response.status()) => {
+                    retry_delay(response.headers(), attempt)
+                }
+                Err(error) if is_retryable(&self.method, error) => {
+                    retry_delay(&reqwest::header::HeaderMap::new(), attempt)
+                }
+                _ => return outcome.into_diagnostic(),
+            };
+
+            let Some(delay) = delay.filter(|delay| {
+                attempt < MAX_SEND_ATTEMPTS && started.elapsed() + *delay <= MAX_TOTAL_RETRY_WAIT
+            }) else {
+                return outcome.into_diagnostic();
+            };
+
+            let resend_at = tokio::time::Instant::now() + delay;
+
+            match outcome {
+                Ok(response) => {
+                    tracing::warn!(
+                        "registry answered {} for {}, retrying in {:.1}s (attempt {attempt} of {MAX_SEND_ATTEMPTS})",
+                        response.status(),
+                        response.url(),
+                        delay.as_secs_f64()
+                    );
+
+                    // Reading the body to its end lets the connection be used again.
+                    let _ = tokio::time::timeout_at(resend_at, drain(response)).await;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "{error} ({}), retrying in {:.1}s (attempt {attempt} of {MAX_SEND_ATTEMPTS})",
+                        root_cause(&error),
+                        delay.as_secs_f64()
+                    );
+                }
             }
 
-            let Some(delay) = retry_delay(response.headers(), attempt)
-                .filter(|delay| waited + *delay <= MAX_TOTAL_RETRY_WAIT)
-            else {
-                return Ok(response);
-            };
-
-            tracing::warn!(
-                "registry answered {} for {}, retrying in {:.1}s (attempt {attempt} of {MAX_SEND_ATTEMPTS})",
-                response.status(),
-                response.url(),
-                delay.as_secs_f64()
-            );
-
-            tokio::time::sleep(delay).await;
-            waited += delay;
+            tokio::time::sleep_until(resend_at).await;
             attempt += 1;
         }
     }
 }
 
-/// Total number of times a throttled request is sent before its response is returned as is.
+/// Total number of times a request is sent before its response or error is returned as is.
 const MAX_SEND_ATTEMPTS: u32 = 6;
 
 /// Longest `Retry-After` the client waits for. A longer cooldown ends the retries.
@@ -557,8 +667,11 @@ const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 /// Shortest wait before a resend, used when the registry sends `Retry-After: 0`.
 const MIN_RETRY_DELAY: Duration = Duration::from_millis(100);
 
-/// Longest time one request spends waiting between its attempts.
+/// Longest time after the first attempt of a request at which it is still sent again.
 const MAX_TOTAL_RETRY_WAIT: Duration = Duration::from_secs(120);
+
+/// Largest body of a throttled response that is read so that its connection can be used again.
+const MAX_DRAINED_BODY: usize = 64 * 1024;
 
 /// Whether the status asks the client to slow down and try again.
 fn is_throttled(status: reqwest::StatusCode) -> bool {
@@ -566,19 +679,60 @@ fn is_throttled(status: reqwest::StatusCode) -> bool {
         || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
 }
 
+/// Whether a request that failed with `error` before a response arrived may be sent again.
+///
+/// A request that never reached the registry, because no connection could be established, is
+/// sent again whatever its method. Any other failure, such as a timeout or a connection that
+/// the registry closed, is only resent for a method without side effects: the registry may have
+/// stored an upload whose response was lost.
+fn is_retryable(method: &Method, error: &reqwest::Error) -> bool {
+    error.is_connect() || (method.is_safe() && (error.is_timeout() || error.is_request()))
+}
+
+/// The innermost cause of the error, which names what went wrong on the connection.
+fn root_cause(error: &reqwest::Error) -> &(dyn std::error::Error + 'static) {
+    let mut cause: &(dyn std::error::Error + 'static) = error;
+
+    while let Some(source) = cause.source() {
+        cause = source;
+    }
+
+    cause
+}
+
+/// Reads the response body to its end, or gives up after [`MAX_DRAINED_BODY`] bytes.
+async fn drain(mut response: Response) {
+    let mut remaining = MAX_DRAINED_BODY;
+
+    while let Ok(Some(chunk)) = response.chunk().await {
+        let Some(rest) = remaining.checked_sub(chunk.len()) else {
+            return;
+        };
+        remaining = rest;
+    }
+}
+
 /// Time to wait before resending after the given attempt (1-based).
 ///
-/// A `Retry-After` header given in seconds is never shortened, so the request is not resent
-/// before the cooldown the registry asked for. `None` means that cooldown exceeds
-/// [`MAX_RETRY_AFTER`] and the request should not be resent. Without the header, or with one
-/// given as an HTTP date, the wait doubles from one second per attempt. Every wait gets up to
-/// 50% jitter on top so that concurrent installs spread out.
+/// A `Retry-After` header, given in seconds or as an HTTP date, is never shortened, so the
+/// request is not resent before the cooldown the registry asked for. `None` means that cooldown
+/// exceeds [`MAX_RETRY_AFTER`] and the request should not be resent. Without a usable header the
+/// wait doubles from one second per attempt. Every wait gets up to 50% jitter on top so that
+/// concurrent installs spread out.
 fn retry_delay(headers: &reqwest::header::HeaderMap, attempt: u32) -> Option<Duration> {
+    retry_delay_at(headers, attempt, SystemTime::now())
+}
+
+/// [`retry_delay`] with `now` as the time an HTTP date in `Retry-After` is measured from.
+fn retry_delay_at(
+    headers: &reqwest::header::HeaderMap,
+    attempt: u32,
+    now: SystemTime,
+) -> Option<Duration> {
     let retry_after = headers
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(Duration::from_secs);
+        .and_then(|value| parse_retry_after(value.trim(), now));
 
     let base = match retry_after {
         Some(retry_after) if retry_after > MAX_RETRY_AFTER => return None,
@@ -587,6 +741,20 @@ fn retry_delay(headers: &reqwest::header::HeaderMap, attempt: u32) -> Option<Dur
     };
 
     Some(base + base.mul_f64(0.5 * jitter_fraction()))
+}
+
+/// The cooldown that a `Retry-After` value asks for at the time `now`.
+///
+/// The value is a number of seconds or an HTTP date. A date that has passed is a cooldown of
+/// zero. `None` means the value is neither.
+fn parse_retry_after(value: &str, now: SystemTime) -> Option<Duration> {
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+
+    let date = httpdate::parse_http_date(value).ok()?;
+
+    Some(date.duration_since(now).unwrap_or(Duration::ZERO))
 }
 
 /// A pseudo-random value in `[0, 1)`, seeded per call by the standard library's hasher.
@@ -684,11 +852,50 @@ mod tests {
         assert_eq!(retry_delay(&retry_after("61"), 1), None);
     }
 
+    /// A fixed point in time, on a whole second as HTTP dates are.
+    fn now() -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000)
+    }
+
+    fn retry_after_date(date: SystemTime) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            RETRY_AFTER,
+            HeaderValue::from_str(&httpdate::fmt_http_date(date)).unwrap(),
+        );
+        headers
+    }
+
+    #[test]
+    fn retry_after_as_a_future_date_waits_until_then() {
+        let headers = retry_after_date(now() + Duration::from_secs(30));
+        let delay = retry_delay_at(&headers, 1, now()).unwrap();
+
+        assert!(delay >= Duration::from_secs(30), "{delay:?}");
+        assert!(delay <= Duration::from_secs(45), "{delay:?}");
+    }
+
+    #[test]
+    fn retry_after_as_a_past_date_waits_the_minimum() {
+        let headers = retry_after_date(now() - Duration::from_secs(3600));
+        let delay = retry_delay_at(&headers, 4, now()).unwrap();
+
+        assert!(delay >= MIN_RETRY_DELAY, "{delay:?}");
+        assert!(delay <= MIN_RETRY_DELAY.mul_f64(1.5), "{delay:?}");
+    }
+
+    #[test]
+    fn retry_after_as_a_date_beyond_the_limit_ends_the_retries() {
+        let at_limit = retry_after_date(now() + MAX_RETRY_AFTER);
+        let beyond = retry_after_date(now() + MAX_RETRY_AFTER + Duration::from_secs(1));
+
+        assert!(retry_delay_at(&at_limit, 1, now()).is_some());
+        assert_eq!(retry_delay_at(&beyond, 1, now()), None);
+    }
+
     #[test]
     fn backoff_doubles_without_a_usable_header() {
-        let http_date = retry_after("Wed, 21 Oct 2026 07:28:00 GMT");
-
-        for headers in [HeaderMap::new(), http_date] {
+        for headers in [HeaderMap::new(), retry_after("soon")] {
             for attempt in 1..MAX_SEND_ATTEMPTS {
                 let base = Duration::from_secs(1) * 2u32.pow(attempt - 1);
                 let delay = retry_delay(&headers, attempt).unwrap();
@@ -705,5 +912,102 @@ mod tests {
         assert!(is_throttled(StatusCode::SERVICE_UNAVAILABLE));
         assert!(!is_throttled(StatusCode::NOT_FOUND));
         assert!(!is_throttled(StatusCode::INTERNAL_SERVER_ERROR));
+    }
+
+    #[test]
+    fn timeout_setting_reads_seconds() {
+        let default = Duration::from_secs(60);
+        let setting = |value| timeout_setting("BUFFRS_HTTP_TIMEOUT", value, default);
+
+        assert_eq!(setting(None).unwrap(), Some(default));
+        assert_eq!(setting(Some("")).unwrap(), Some(default));
+        assert_eq!(setting(Some(" 5 ")).unwrap(), Some(Duration::from_secs(5)));
+        assert_eq!(setting(Some("0")).unwrap(), None);
+
+        let error = setting(Some("5s")).unwrap_err().to_string();
+        assert!(error.contains("BUFFRS_HTTP_TIMEOUT"), "{error}");
+        assert!(setting(Some("-1")).is_err());
+    }
+
+    /// Accepts connections and passes each to `serve`. Returns the URL to request.
+    async fn serve_connections<F, Fut>(serve: F) -> String
+    where
+        F: Fn(tokio::net::TcpStream) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/artifact", listener.local_addr().unwrap());
+
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(serve(stream));
+            }
+        });
+
+        url
+    }
+
+    /// A client that gives up on a silent registry after a short time.
+    fn impatient_client() -> reqwest::Client {
+        build_client(
+            CertValidationPolicy::Validate,
+            HttpTimeouts {
+                connect: Some(Duration::from_secs(5)),
+                read: Some(Duration::from_millis(300)),
+            },
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn request_to_a_silent_registry_times_out() {
+        // The registry accepts the connection and never answers.
+        let url = serve_connections(|stream| async move {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            drop(stream);
+        })
+        .await;
+
+        let started = std::time::Instant::now();
+        let error = impatient_client().get(&url).send().await.unwrap_err();
+
+        assert!(error.is_timeout(), "{error:?}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(is_retryable(&Method::GET, &error));
+        assert!(is_retryable(&Method::HEAD, &error));
+        assert!(!is_retryable(&Method::PUT, &error));
+    }
+
+    #[tokio::test]
+    async fn closed_connection_is_retried_for_safe_methods_only() {
+        // The registry closes every connection without answering.
+        let url = serve_connections(|stream| async move { drop(stream) }).await;
+
+        let error = impatient_client().get(&url).send().await.unwrap_err();
+
+        assert!(!error.is_connect(), "{error:?}");
+        assert!(is_retryable(&Method::GET, &error));
+        assert!(!is_retryable(&Method::PUT, &error));
+    }
+
+    #[tokio::test]
+    async fn failed_connect_is_retried_for_every_method() {
+        // Nothing listens on the port of a listener that has been closed.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/artifact", listener.local_addr().unwrap());
+        drop(listener);
+
+        let client = build_client(
+            CertValidationPolicy::Validate,
+            HttpTimeouts {
+                connect: Some(Duration::from_secs(30)),
+                read: None,
+            },
+        )
+        .unwrap();
+        let error = client.put(&url).send().await.unwrap_err();
+
+        assert!(error.is_connect(), "{error:?}");
+        assert!(is_retryable(&Method::PUT, &error));
     }
 }

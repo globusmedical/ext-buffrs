@@ -288,7 +288,8 @@ pub struct Manifest {
     pub edition: Edition,
     /// Metadata about the root package
     pub package: Option<PackageManifest>,
-    /// List of packages the root package depends on
+    /// List of packages the root package depends on, ordered by package name when the manifest
+    /// is parsed
     pub dependencies: Vec<Dependency>,
 }
 
@@ -331,7 +332,7 @@ impl Manifest {
             .into_diagnostic()
             .wrap_err(DeserializationError(ManagedFile::Manifest))?;
 
-        let dependencies = raw
+        let mut dependencies = raw
             .dependencies()
             .iter()
             .map(|(toml_key, manifest)| {
@@ -397,6 +398,10 @@ impl Manifest {
                 })
             })
             .collect::<miette::Result<Vec<_>>>()?;
+
+        // The resolver walks dependencies in this order, and the order decides which requester's
+        // repository Proto.lock records for a package that several of them require.
+        dependencies.sort_by(|a, b| a.package.cmp(&b.package));
 
         Ok(Self {
             edition: raw.edition(),

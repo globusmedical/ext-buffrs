@@ -317,7 +317,7 @@ dependencies = [
 
 [[package]]
 name = "buffrs"
-version = "1.2.13"
+version = "1.2.14"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -333,6 +333,7 @@ dependencies = [
  "gix",
  "hex",
  "home",
+ "httpdate",
  "human-panic",
  "miette",
  "paste",
