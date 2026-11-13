@@ -25,6 +25,10 @@ pub struct RegistryProbe {
     get_requests: Mutex<Vec<String>>,
     /// Number of upcoming GET requests to reject with 429.
     throttled: AtomicUsize,
+    /// Path fragments whose GET requests are always rejected with 429.
+    throttled_paths: Mutex<Vec<String>>,
+    /// Paths the registry pretends not to have.
+    hidden: Mutex<Vec<String>>,
 }
 
 impl RegistryProbe {
@@ -41,6 +45,27 @@ impl RegistryProbe {
     /// Rejects the next `count` GET requests with `429 Too Many Requests`.
     pub fn throttle_next(&self, count: usize) {
         self.throttled.store(count, Ordering::SeqCst);
+    }
+
+    /// Rejects every GET request whose path contains `fragment` with `429 Too Many Requests`.
+    pub fn throttle_path(&self, fragment: &str) {
+        self.throttled_paths
+            .lock()
+            .unwrap()
+            .push(fragment.to_owned());
+    }
+
+    /// Makes the registry answer as if the artifact at `path` had been deleted.
+    pub fn hide(&self, path: &str) {
+        self.hidden.lock().unwrap().push(path.to_owned());
+    }
+
+    fn is_hidden(&self, path: &str) -> bool {
+        self.hidden
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|hidden| hidden == path)
     }
 }
 
@@ -127,7 +152,13 @@ async fn get_package(
     let throttled = probe
         .throttled
         .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-        .is_ok();
+        .is_ok()
+        || probe
+            .throttled_paths
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|fragment| path.contains(fragment));
     if throttled {
         return (StatusCode::TOO_MANY_REQUESTS, [(header::RETRY_AFTER, "0")]).into_response();
     }
@@ -138,6 +169,7 @@ async fn get_package(
             .read()
             .unwrap()
             .keys()
+            .filter(|key| !probe.is_hidden(key))
             .filter_map(|key| key.strip_prefix(&prefix))
             .map(|file| StorageChild {
                 uri: format!("/{file}"),
@@ -150,6 +182,10 @@ async fn get_package(
         }
 
         return Json(StorageFolder { children }).into_response();
+    }
+
+    if probe.is_hidden(&path) {
+        return StatusCode::NOT_FOUND.into_response();
     }
 
     tracing::info!("Downloaded package from {path}");
@@ -172,9 +208,13 @@ struct StorageChild {
 }
 
 /// HEAD handler: returns 200 if artifact exists, 404 otherwise (no body)
-async fn head_package(State(state): State<AppState>, Path(path): Path<String>) -> StatusCode {
+async fn head_package(
+    State(state): State<AppState>,
+    Extension(probe): Extension<Arc<RegistryProbe>>,
+    Path(path): Path<String>,
+) -> StatusCode {
     tracing::info!("HEAD check for {path}");
-    if state.read().unwrap().contains_key(&path) {
+    if state.read().unwrap().contains_key(&path) && !probe.is_hidden(&path) {
         StatusCode::OK
     } else {
         StatusCode::NOT_FOUND

@@ -299,7 +299,11 @@ impl DependencyProvider for BuffrsDependencyProvider {
                     if let Some(preferred) = self.preferred_versions.read().unwrap().get(name) {
                         let has_metadata = info.dependencies.is_empty()
                             || info.dependencies.contains_key(preferred);
-                        if range.contains(preferred) && has_metadata {
+                        // A pinned version the registry no longer lists is not a candidate.
+                        if info.versions.contains(preferred)
+                            && range.contains(preferred)
+                            && has_metadata
+                        {
                             return Ok(Some(preferred.clone()));
                         }
                     }
@@ -775,5 +779,25 @@ mod tests {
         assert!(
             err.message.contains("C") || err.message.contains("A") || err.message.contains("B")
         );
+    }
+
+    #[test]
+    fn preferred_version_missing_from_the_listing_is_not_chosen() {
+        let provider = BuffrsDependencyProvider::new(vec![PackageDependency {
+            package: pkg("foo"),
+            version_req: req("^1.0.0"),
+        }]);
+
+        provider.add_package(
+            pkg("foo"),
+            PackageInfo {
+                versions: vec![v("1.0.0")],
+                dependencies: HashMap::new(),
+            },
+        );
+        provider.set_preferred_version(pkg("foo"), v("1.1.0"));
+
+        let result = resolve(&provider).unwrap();
+        assert_eq!(result.get(&pkg("foo")), Some(&v("1.0.0")));
     }
 }
