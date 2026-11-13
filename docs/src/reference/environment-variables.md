@@ -68,7 +68,8 @@ answered within this time, so raise the value on a very slow link. `0` removes t
 **Default:** `60`
 
 A request that fails to connect, times out or loses its connection is sent again, as is
-one that the registry answers with `429` or `503`: up to six times in total and for at
+one that the registry answers with `429` or `503`, and a download or version listing whose
+response is cut off or stalls part way through the body: up to six times in total and for at
 most two minutes, waiting between attempts for the time the registry asks for in
 `Retry-After` or else for one second, doubling each time. An upload is only sent again
 if no connection could be established.

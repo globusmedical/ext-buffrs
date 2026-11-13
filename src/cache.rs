@@ -252,9 +252,11 @@ impl Entry {
 
     /// A new name for the file that holds this entry while it is written.
     ///
-    /// The name is that of an entry of another package, `{package-name}-tmp-{nonce}`, with the
-    /// same digest. [`Cache::homogenize`] in a concurrent process therefore keeps the file, and no
-    /// lookup resolves to it, because the digest belongs to a package with a different name.
+    /// The name is that of an entry with the same digest for a package named
+    /// `buffrs-tmp-{nonce}`, which is a valid package name of 27 characters whatever the name of
+    /// the package being written. [`Cache::homogenize`] in a concurrent process therefore keeps
+    /// the file, and no lookup resolves to it, because lookups are by the name of the package the
+    /// digest belongs to.
     fn temp_filename(&self) -> PathBuf {
         use std::hash::{BuildHasher, Hasher};
 
@@ -262,9 +264,9 @@ impl Entry {
             .build_hasher()
             .finish();
         let filename = self.0.to_string_lossy();
-        let (name, rest) = filename.split_once('.').unwrap_or((&filename, ""));
+        let rest = filename.split_once('.').map_or("", |(_, rest)| rest);
 
-        format!("{name}-tmp-{nonce:016x}.{rest}").into()
+        format!("buffrs-tmp-{nonce:016x}.{rest}").into()
     }
 }
 
@@ -385,9 +387,28 @@ mod tests {
 
         assert_ne!(temp, entry.filename());
         assert_ne!(temp, entry.temp_filename());
+        let temp_name = temp.to_string_lossy();
+        let (_, digest) = entry.filename().to_str().unwrap().split_once('.').unwrap();
+        assert!(temp_name.starts_with("buffrs-tmp-"), "{temp_name}");
+        assert!(temp_name.ends_with(digest), "{temp_name}");
 
         std::fs::write(cache.path().join(&temp), b"cont").unwrap();
         std::fs::write(cache.path().join("stray.tmp"), b"stray").unwrap();
+        cache.homogenize().await.unwrap();
+
+        assert_eq!(file_names(&cache), [temp.to_string_lossy()]);
+    }
+
+    #[tokio::test]
+    async fn homogenize_keeps_the_temporary_file_of_a_package_with_the_longest_name() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let cache = Cache::new(dir.path().to_owned()).await.unwrap();
+        let name = format!("a{}", "-b".repeat(63)) + "c";
+        assert_eq!(name.len(), 128);
+        PackageName::new(name.as_str()).unwrap();
+        let temp = entry(&name, b"content").temp_filename();
+
+        std::fs::write(cache.path().join(&temp), b"cont").unwrap();
         cache.homogenize().await.unwrap();
 
         assert_eq!(file_names(&cache), [temp.to_string_lossy()]);

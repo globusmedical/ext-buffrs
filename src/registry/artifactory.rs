@@ -18,8 +18,9 @@ use crate::{
     package::{Package, PackageName},
     registry::RegistryUri,
 };
+use bytes::Bytes;
 use miette::{ensure, miette, Context, IntoDiagnostic};
-use reqwest::{Body, Method, Response};
+use reqwest::{header::HeaderMap, Body, Method, Response, StatusCode};
 use semver::Version;
 use serde::Deserialize;
 use std::time::{Duration, SystemTime};
@@ -266,32 +267,29 @@ impl Artifactory {
 
         let response = self
             .new_request(Method::GET, storage_url.clone())
-            .send_raw()
+            .send_and_read()
             .await?;
 
         // A 404 means the package folder doesn't exist yet — return empty
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
+        if response.status == reqwest::StatusCode::NOT_FOUND {
             tracing::debug!("Package folder not found at {storage_url}, returning empty versions");
             return Ok(Vec::new());
         }
 
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        if response.status == reqwest::StatusCode::UNAUTHORIZED {
             return Err(miette!(
                 "unauthorized - please provide registry credentials with `buffrs login`"
             ));
         }
 
-        if !response.status().is_success() {
+        if !response.status.is_success() {
             return Err(miette!(
                 "unexpected status {} from storage API at {storage_url}",
-                response.status()
+                response.status
             ));
         }
 
-        let response_str = response.text().await.into_diagnostic().wrap_err(miette!(
-            "unexpected error: unable to retrieve response payload"
-        ))?;
-        let parsed_response = serde_json::from_str::<StorageFolderInfo>(&response_str)
+        let parsed_response = serde_json::from_slice::<StorageFolderInfo>(&response.body)
             .into_diagnostic()
             .wrap_err(miette!(
                 "unexpected error: response could not be deserialized to StorageFolderInfo"
@@ -371,7 +369,6 @@ impl Artifactory {
         version: &Version,
     ) -> Result<Package, DownloadFailure> {
         use crate::version::version_to_artifact_string;
-        use reqwest::StatusCode;
 
         let artifact_url = {
             let version_str = version_to_artifact_string(version);
@@ -390,12 +387,12 @@ impl Artifactory {
 
         let response = self
             .new_request(Method::GET, artifact_url)
-            .send_raw()
+            .send_and_read()
             .await
             .map_err(DownloadFailure::Other)?;
-        let status = response.status();
-        let response = match ValidatedResponse::try_from(response) {
-            Ok(response) => response.0,
+        let status = response.status;
+        let response = match response.validate() {
+            Ok(response) => response,
             Err(e) if status == StatusCode::NOT_FOUND || status == StatusCode::GONE => {
                 return Err(DownloadFailure::NotFound(e))
             }
@@ -404,7 +401,7 @@ impl Artifactory {
         };
 
         let content_type = response
-            .headers()
+            .headers
             .get(&reqwest::header::CONTENT_TYPE)
             .ok_or_else(|| DownloadFailure::Other(miette!("missing content-type header")))?;
 
@@ -414,13 +411,7 @@ impl Artifactory {
             )));
         }
 
-        let data = response
-            .bytes()
-            .await
-            .into_diagnostic()
-            .map_err(DownloadFailure::Other)?;
-
-        Package::try_from(data)
+        Package::try_from(response.body)
             .wrap_err(miette!(
                 "failed to download dependency {}@{}",
                 name,
@@ -458,10 +449,13 @@ impl Artifactory {
 
         tracing::debug!("Hitting download URL: {artifact_url}");
 
-        let response = self.new_request(Method::GET, artifact_url).send().await?;
-        let response: reqwest::Response = response.0;
-        let headers = response.headers();
-        let content_type = headers
+        let response = self
+            .new_request(Method::GET, artifact_url)
+            .send_and_read()
+            .await?
+            .validate()?;
+        let content_type = response
+            .headers
             .get(&reqwest::header::CONTENT_TYPE)
             .ok_or_else(|| miette!("missing content-type header"))?;
 
@@ -470,9 +464,7 @@ impl Artifactory {
             "server response has incorrect mime type: {content_type:?}"
         );
 
-        let data = response.bytes().await.into_diagnostic()?;
-
-        Package::try_from(data).wrap_err(miette!(
+        Package::try_from(response.body).wrap_err(miette!(
             "failed to download dependency {}",
             dependency.package
         ))
@@ -583,8 +575,11 @@ impl RequestBuilder {
         self
     }
 
-    async fn send(self) -> miette::Result<ValidatedResponse> {
-        self.send_with_retry().await?.try_into()
+    /// Sends the request and fails unless the registry answered with success.
+    async fn send(self) -> miette::Result<Response> {
+        let response = self.send_with_retry().await?;
+        check_status(response.status(), response.url())?;
+        Ok(response)
     }
 
     /// Send request and return raw response without validation.
@@ -594,7 +589,7 @@ impl RequestBuilder {
     }
 
     /// Sends the request, waiting and resending while the registry throttles it or cannot be
-    /// reached.
+    /// reached, and returns the response once its headers arrive.
     ///
     /// A registry behind a rate limiter answers 429 (or 503 while overloaded) to a burst of
     /// requests, which several concurrent installs from one address produce, and a busy registry
@@ -603,36 +598,76 @@ impl RequestBuilder {
     /// sent; after that the last response or error is returned as is. [`is_retryable`] decides
     /// which failures are resent. A request whose body cannot be replayed is sent once.
     async fn send_with_retry(self) -> miette::Result<reqwest::Response> {
+        self.retry(|response| async move { Ok(response) })
+            .await
+            .into_diagnostic()
+    }
+
+    /// Like [`Self::send_with_retry`], and reads the whole response body before it returns.
+    ///
+    /// A failure while the body is read is resent like one before the response arrived, so a
+    /// download that the registry or the network cuts off or stalls part way is sent again.
+    async fn send_and_read(self) -> miette::Result<FetchedResponse> {
+        let fetched = self
+            .retry(|response| async move {
+                let status = response.status();
+                let headers = response.headers().clone();
+                let url = response.url().clone();
+                let body = response.bytes().await?;
+
+                Ok(FetchedResponse {
+                    status,
+                    headers,
+                    url,
+                    body,
+                })
+            })
+            .await;
+
+        match fetched {
+            Ok(fetched) => Ok(fetched),
+            Err(error) if error.is_body() || error.is_decode() => {
+                Err(error).into_diagnostic().wrap_err(miette!(
+                    "unexpected error: unable to retrieve response payload"
+                ))
+            }
+            Err(error) => Err(error).into_diagnostic(),
+        }
+    }
+
+    /// The retry loop of [`Self::send_with_retry`] and [`Self::send_and_read`].
+    ///
+    /// `receive` turns a response that is not throttled into the result, and a failure it
+    /// returns is resent like one before the response arrived. A throttled response that is not
+    /// resent any more is passed to `receive` as well.
+    async fn retry<T, F, Fut>(self, receive: F) -> Result<T, reqwest::Error>
+    where
+        F: Fn(Response) -> Fut,
+        Fut: std::future::Future<Output = Result<T, reqwest::Error>>,
+    {
         let started = tokio::time::Instant::now();
         let mut attempt = 1;
 
         loop {
             let Some(request) = self.request.try_clone() else {
-                return self.request.send().await.into_diagnostic();
+                return receive(self.request.send().await?).await;
             };
 
-            let outcome = request.send().await;
+            let within_budget = |delay: Option<Duration>| {
+                delay.filter(|delay| {
+                    attempt < MAX_SEND_ATTEMPTS
+                        && started.elapsed() + *delay <= MAX_TOTAL_RETRY_WAIT
+                })
+            };
 
-            let delay = match &outcome {
+            let error = match request.send().await {
                 Ok(response) if is_throttled(response.status()) => {
-                    retry_delay(response.headers(), attempt)
-                }
-                Err(error) if is_retryable(&self.method, error) => {
-                    retry_delay(&reqwest::header::HeaderMap::new(), attempt)
-                }
-                _ => return outcome.into_diagnostic(),
-            };
+                    let Some(delay) = within_budget(retry_delay(response.headers(), attempt))
+                    else {
+                        return receive(response).await;
+                    };
+                    let resend_at = tokio::time::Instant::now() + delay;
 
-            let Some(delay) = delay.filter(|delay| {
-                attempt < MAX_SEND_ATTEMPTS && started.elapsed() + *delay <= MAX_TOTAL_RETRY_WAIT
-            }) else {
-                return outcome.into_diagnostic();
-            };
-
-            let resend_at = tokio::time::Instant::now() + delay;
-
-            match outcome {
-                Ok(response) => {
                     tracing::warn!(
                         "registry answered {} for {}, retrying in {:.1}s (attempt {attempt} of {MAX_SEND_ATTEMPTS})",
                         response.status(),
@@ -642,20 +677,79 @@ impl RequestBuilder {
 
                     // Reading the body to its end lets the connection be used again.
                     let _ = tokio::time::timeout_at(resend_at, drain(response)).await;
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        "{error} ({}), retrying in {:.1}s (attempt {attempt} of {MAX_SEND_ATTEMPTS})",
-                        root_cause(&error),
-                        delay.as_secs_f64()
-                    );
-                }
-            }
 
-            tokio::time::sleep_until(resend_at).await;
+                    tokio::time::sleep_until(resend_at).await;
+                    attempt += 1;
+                    continue;
+                }
+                Ok(response) => match receive(response).await {
+                    Ok(received) => return Ok(received),
+                    Err(error) => error,
+                },
+                Err(error) => error,
+            };
+
+            let delay = is_retryable(&self.method, &error)
+                .then(|| retry_delay(&HeaderMap::new(), attempt))
+                .flatten();
+            let Some(delay) = within_budget(delay) else {
+                return Err(error);
+            };
+
+            tracing::warn!(
+                "{error} ({}), retrying in {:.1}s (attempt {attempt} of {MAX_SEND_ATTEMPTS})",
+                root_cause(&error),
+                delay.as_secs_f64()
+            );
+
+            tokio::time::sleep(delay).await;
             attempt += 1;
         }
     }
+}
+
+/// A response whose body has been read in full.
+struct FetchedResponse {
+    status: StatusCode,
+    headers: HeaderMap,
+    url: Url,
+    body: Bytes,
+}
+
+impl FetchedResponse {
+    /// Fails unless the registry answered with success, as [`check_status`] decides.
+    fn validate(self) -> miette::Result<Self> {
+        check_status(self.status, &self.url)?;
+        Ok(self)
+    }
+}
+
+/// Fails for a redirect, a missing authorisation and an error status of a response from `url`.
+///
+/// An error status gets the text of the error that `reqwest::Response::error_for_status`
+/// returns.
+fn check_status(status: StatusCode, url: &Url) -> miette::Result<()> {
+    ensure!(
+        !status.is_redirection(),
+        "remote server attempted to redirect request - is this registry URL valid?"
+    );
+
+    ensure!(
+        status != StatusCode::UNAUTHORIZED,
+        "unauthorized - please provide registry credentials with `buffrs login`"
+    );
+
+    let kind = if status.is_client_error() {
+        "client"
+    } else if status.is_server_error() {
+        "server"
+    } else {
+        return Ok(());
+    };
+
+    Err(miette!(
+        "HTTP status {kind} error ({status}) for url ({url})"
+    ))
 }
 
 /// Total number of times a request is sent before its response or error is returned as is.
@@ -679,14 +773,20 @@ fn is_throttled(status: reqwest::StatusCode) -> bool {
         || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
 }
 
-/// Whether a request that failed with `error` before a response arrived may be sent again.
+/// Whether a request that failed with `error` before its response was read may be sent again.
 ///
 /// A request that never reached the registry, because no connection could be established, is
 /// sent again whatever its method. Any other failure, such as a timeout or a connection that
-/// the registry closed, is only resent for a method without side effects: the registry may have
-/// stored an upload whose response was lost.
+/// the registry closed before or while sending the response, is only resent for a method
+/// without side effects: the registry may have stored an upload whose response was lost.
+///
+/// A response body that breaks off is a decode error whose source is a body error, because the
+/// client reads it through its content decoder.
 fn is_retryable(method: &Method, error: &reqwest::Error) -> bool {
-    error.is_connect() || (method.is_safe() && (error.is_timeout() || error.is_request()))
+    let interrupted =
+        error.is_timeout() || error.is_request() || error.is_body() || error.is_decode();
+
+    error.is_connect() || (method.is_safe() && interrupted)
 }
 
 /// The innermost cause of the error, which names what went wrong on the connection.
@@ -784,26 +884,6 @@ impl DownloadFailure {
         match self {
             Self::NotFound(report) | Self::Throttled(report) | Self::Other(report) => report,
         }
-    }
-}
-
-struct ValidatedResponse(reqwest::Response);
-
-impl TryFrom<Response> for ValidatedResponse {
-    type Error = miette::Report;
-
-    fn try_from(value: Response) -> Result<Self, Self::Error> {
-        ensure!(
-            !value.status().is_redirection(),
-            "remote server attempted to redirect request - is this registry URL valid?"
-        );
-
-        ensure!(
-            value.status() != 401,
-            "unauthorized - please provide registry credentials with `buffrs login`"
-        );
-
-        value.error_for_status().into_diagnostic().map(Self)
     }
 }
 
@@ -1009,5 +1089,153 @@ mod tests {
 
         assert!(error.is_connect(), "{error:?}");
         assert!(is_retryable(&Method::PUT, &error));
+    }
+
+    /// The body of a response that the test registries below send in full.
+    const BODY: &[u8] = &[b'x'; 4096];
+
+    /// What a connection of [`interrupting_registry`] does after sending the response headers.
+    #[derive(Clone, Copy)]
+    enum Interruption {
+        /// Sends part of the body and closes the connection.
+        Cut,
+        /// Sends part of the body and stays silent.
+        Stall,
+    }
+
+    /// A registry that answers the first request with an interrupted body and later requests in
+    /// full, each on a connection of its own. Returns the URL and the number of connections.
+    async fn interrupting_registry(
+        interruption: Interruption,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let connections = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = std::sync::Arc::clone(&connections);
+        let url = serve_connections(move |mut stream| {
+            let first = counter.fetch_add(1, Ordering::SeqCst) == 0;
+            async move {
+                let mut request = Vec::new();
+                let mut buffer = [0; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match stream.read(&mut buffer).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(read) => request.extend_from_slice(&buffer[..read]),
+                    }
+                }
+
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/x-gzip\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    BODY.len()
+                );
+                let body = if first { &BODY[..BODY.len() / 2] } else { BODY };
+                let _ = stream.write_all(headers.as_bytes()).await;
+                let _ = stream.write_all(body).await;
+                let _ = stream.flush().await;
+
+                if first {
+                    if let Interruption::Stall = interruption {
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                    }
+                }
+            }
+        })
+        .await;
+
+        (url, connections)
+    }
+
+    #[tokio::test]
+    async fn body_cut_off_is_retried_for_safe_methods_only() {
+        let (url, _) = interrupting_registry(Interruption::Cut).await;
+        let error = impatient_client()
+            .get(&url)
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap_err();
+
+        assert!(is_retryable(&Method::GET, &error), "{error:?}");
+        assert!(!is_retryable(&Method::PUT, &error), "{error:?}");
+
+        let (url, connections) = interrupting_registry(Interruption::Cut).await;
+        let response = RequestBuilder::new(&impatient_client(), Method::GET, url.parse().unwrap())
+            .send_and_read()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(response.body, BODY);
+        assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn stalled_body_times_out_and_is_retried() {
+        let (url, connections) = interrupting_registry(Interruption::Stall).await;
+        let response = RequestBuilder::new(&impatient_client(), Method::GET, url.parse().unwrap())
+            .send_and_read()
+            .await
+            .unwrap();
+
+        assert_eq!(response.body, BODY);
+        assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn status_errors_read_as_those_of_reqwest() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::NOT_FOUND,
+            StatusCode::GONE,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            let url = serve_connections(move |mut stream| async move {
+                let _ = stream.read(&mut [0; 1024]).await;
+                let response = format!(
+                    "HTTP/1.1 {} {}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                    status.as_str(),
+                    status.canonical_reason().unwrap()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            })
+            .await;
+
+            let response = impatient_client().get(&url).send().await.unwrap();
+            let url = response.url().clone();
+            let expected = response.error_for_status().unwrap_err().to_string();
+
+            let actual = FetchedResponse {
+                status,
+                headers: HeaderMap::new(),
+                url,
+                body: Bytes::new(),
+            }
+            .validate()
+            .err()
+            .unwrap()
+            .to_string();
+
+            assert_eq!(actual, expected);
+        }
+
+        let url: Url = "http://registry.test/artifact".parse().unwrap();
+        let message = |status| check_status(status, &url).unwrap_err().to_string();
+
+        assert_eq!(
+            message(StatusCode::FOUND),
+            "remote server attempted to redirect request - is this registry URL valid?"
+        );
+        assert_eq!(
+            message(StatusCode::UNAUTHORIZED),
+            "unauthorized - please provide registry credentials with `buffrs login`"
+        );
+        assert!(check_status(StatusCode::OK, &url).is_ok());
     }
 }

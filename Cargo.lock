@@ -330,6 +330,7 @@ dependencies = [
  "diff-struct",
  "flate2",
  "fs_extra",
+ "futures-util",
  "gix",
  "hex",
  "home",

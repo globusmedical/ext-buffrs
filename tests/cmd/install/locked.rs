@@ -775,6 +775,71 @@ fn stalled_request_times_out_and_is_retried() {
     });
 }
 
+/// The paths of `requests`, each with the number of times it was requested.
+fn request_counts(requests: &[String]) -> Vec<(String, usize)> {
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    for path in requests {
+        *counts.entry(path.clone()).or_default() += 1;
+    }
+    counts.into_iter().collect()
+}
+
+/// Installs from a current lockfile into an empty cache while the registry interrupts the body
+/// of the first download: it closes the connection part way, or with `stall` stays silent for
+/// longer than the timeout of one second.
+fn install_with_interrupted_download(stall: bool) {
+    with_probed_test_registry(|registry_url, probe| {
+        let vfs = VirtualFileSystem::empty();
+        let buffrs_home = vfs.root().join("$HOME");
+        let root = vfs.root();
+
+        publish_api_with_two_lib_versions(&root, &buffrs_home, registry_url);
+        let consumer_dir = consumer(&root, &remote("api-a", "^0.1", registry_url));
+        install(&consumer_dir, &buffrs_home);
+        let lock = read_lock(&consumer_dir);
+
+        remove_cache(&buffrs_home);
+        probe.clear();
+        if stall {
+            probe.stall_next_downloads(1);
+        } else {
+            probe.cut_off_next_downloads(1);
+        }
+        crate::cli!()
+            .arg("install")
+            .env("BUFFRS_HOME", &buffrs_home)
+            .env("BUFFRS_HTTP_TIMEOUT", "1")
+            .current_dir(&consumer_dir)
+            .assert()
+            .success();
+
+        // The interrupted download is sent again, and only that one.
+        let requests = probe.get_requests();
+        let counts = request_counts(&requests);
+        let resent: Vec<_> = counts.iter().filter(|(_, count)| *count > 1).collect();
+        assert_eq!(resent.len(), 1, "{requests:?}");
+        assert_eq!(resent[0].1, 2, "{requests:?}");
+        assert_eq!(
+            counts.into_iter().map(|(path, _)| path).collect::<Vec<_>>(),
+            [
+                artifact_path("api-a", "0.1.0"),
+                artifact_path("lib-shared", "0.1.1")
+            ]
+        );
+        assert_eq!(lock, read_lock(&consumer_dir));
+    });
+}
+
+#[test]
+fn download_cut_off_part_way_is_retried() {
+    install_with_interrupted_download(false);
+}
+
+#[test]
+fn download_stalled_part_way_times_out_and_is_retried() {
+    install_with_interrupted_download(true);
+}
+
 /// Installs, cuts every cache entry in half and installs again.
 fn install_with_truncated_cache(config_edition: &str) {
     with_probed_test_registry(|registry_url, probe| {

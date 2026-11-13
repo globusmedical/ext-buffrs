@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use axum::{
+    body::Body,
     extract::{Extension, Path, Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
@@ -33,6 +34,10 @@ pub struct RegistryProbe {
     dropped_connections: AtomicUsize,
     /// Number of upcoming GET requests to leave unanswered for [`STALL`].
     stalled: AtomicUsize,
+    /// Number of upcoming package downloads whose connection is closed part way through the body.
+    cut_off_downloads: AtomicUsize,
+    /// Number of upcoming package downloads that stall for [`STALL`] part way through the body.
+    stalled_downloads: AtomicUsize,
     /// Number of connections accepted so far.
     connections: AtomicUsize,
 }
@@ -85,6 +90,18 @@ impl RegistryProbe {
     /// Leaves the next `count` GET requests unanswered for several seconds.
     pub fn stall_next(&self, count: usize) {
         self.stalled.store(count, Ordering::SeqCst);
+    }
+
+    /// Sends the headers and half the body of the next `count` package downloads, then closes
+    /// their connections.
+    pub fn cut_off_next_downloads(&self, count: usize) {
+        self.cut_off_downloads.store(count, Ordering::SeqCst);
+    }
+
+    /// Sends the headers and half the body of the next `count` package downloads, then stays
+    /// silent for several seconds before closing their connections.
+    pub fn stall_next_downloads(&self, count: usize) {
+        self.stalled_downloads.store(count, Ordering::SeqCst);
     }
 
     /// Makes the registry answer as if the artifact at `path` had been deleted.
@@ -230,10 +247,55 @@ async fn get_package(
     }
 
     tracing::info!("Downloaded package from {path}");
-    match state.read().unwrap().get(&path).cloned() {
-        Some(content) => ([(header::CONTENT_TYPE, "application/x-gzip")], content).into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
+    let Some(content) = state.read().unwrap().get(&path).cloned() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    let interruption = if take_one(&probe.cut_off_downloads) {
+        Some(Duration::from_millis(100))
+    } else if take_one(&probe.stalled_downloads) {
+        Some(STALL)
+    } else {
+        None
+    };
+
+    match interruption {
+        Some(pause) => (
+            [
+                (header::CONTENT_TYPE, "application/x-gzip".to_owned()),
+                (header::CONTENT_LENGTH, content.len().to_string()),
+            ],
+            interrupted_body(content, pause),
+        )
+            .into_response(),
+        None => ([(header::CONTENT_TYPE, "application/x-gzip")], content).into_response(),
     }
+}
+
+/// A body that sends the first half of `content`, pauses for `pause` and then fails, which
+/// closes the connection before the length announced in the headers has been sent.
+fn interrupted_body(content: Bytes, pause: Duration) -> Body {
+    let half = content.slice(..content.len() / 2);
+    let parts = futures_util::stream::unfold(0, move |part| {
+        let half = half.clone();
+        async move {
+            match part {
+                0 => Some((Ok(half), 1)),
+                1 => {
+                    // The pause lets the server send the first half before the connection closes.
+                    tokio::time::sleep(pause).await;
+                    let error = std::io::Error::new(
+                        std::io::ErrorKind::ConnectionAborted,
+                        "the test registry interrupts the body",
+                    );
+                    Some((Err(error), 2))
+                }
+                _ => None,
+            }
+        }
+    });
+
+    Body::from_stream(parts)
 }
 
 /// Artifactory storage API folder listing
