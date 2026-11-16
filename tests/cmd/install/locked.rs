@@ -124,6 +124,68 @@ message Marker {{
         .success();
 }
 
+fn install_locked(project_dir: &Path, buffrs_home: &Path) {
+    install_output(project_dir, buffrs_home, &["--locked"], &[]);
+}
+
+/// Runs a successful `buffrs install` with the given arguments and variables, returning what it
+/// printed.
+fn install_output(
+    project_dir: &Path,
+    buffrs_home: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> String {
+    let assert = crate::cli!()
+        .arg("install")
+        .args(args)
+        .envs(env.iter().copied())
+        .env("BUFFRS_HOME", buffrs_home)
+        .current_dir(project_dir)
+        .assert()
+        .success();
+    let output = assert.get_output();
+    unwrapped(&format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    ))
+}
+
+/// Runs a failing `buffrs install` with the given arguments and variables, returning stderr.
+fn locked_install_fails(
+    project_dir: &Path,
+    buffrs_home: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> String {
+    let output = crate::cli!()
+        .arg("install")
+        .args(args)
+        .envs(env.iter().copied())
+        .env("BUFFRS_HOME", buffrs_home)
+        .current_dir(project_dir)
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    unwrapped(&String::from_utf8(output).unwrap())
+}
+
+/// `stderr` with the lines that the error report wraps joined again.
+fn unwrapped(stderr: &str) -> String {
+    stderr
+        .lines()
+        .map(|line| {
+            line.trim_start_matches([' ', '×', '│', '├', '╰', '─', '▶'])
+                .trim_end()
+        })
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn install_fails(project_dir: &Path, buffrs_home: &Path) {
     crate::cli!()
         .arg("install")
@@ -136,6 +198,10 @@ fn install_fails(project_dir: &Path, buffrs_home: &Path) {
 /// A dependency on the default registry, which the config names by alias.
 fn remote_by_alias(name: &str, version_req: &str) -> String {
     format!(r#"{name} = {{ version = "{version_req}", repository = "{REPOSITORY}" }}"#)
+}
+
+fn listing_path(name: &str) -> String {
+    format!("registry/api/storage/{REPOSITORY}/{name}/")
 }
 
 fn artifact_path(name: &str, version: &str) -> String {
@@ -224,6 +290,105 @@ fn locked_version(consumer_dir: &Path, name: &str) -> String {
         .and_then(toml::Value::as_str)
         .unwrap_or_else(|| panic!("{name} should be present in Proto.lock"))
         .to_owned()
+}
+
+fn locked_field(consumer_dir: &Path, name: &str, field: &str) -> String {
+    let lock: toml::Value = toml::from_str(&read_lock(consumer_dir)).unwrap();
+
+    lock["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|package| package["name"].as_str() == Some(name))
+        .and_then(|package| package[field].as_str())
+        .unwrap_or_else(|| panic!("{name} should have a {field} in Proto.lock"))
+        .to_owned()
+}
+
+/// `base` with the entry for `name` from `other` added.
+fn lock_with_entry_from(base: &str, other: &str, name: &str) -> String {
+    let mut base: toml::Value = toml::from_str(base).unwrap();
+    let other: toml::Value = toml::from_str(other).unwrap();
+    let entry = other["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|package| package["name"].as_str() == Some(name))
+        .unwrap()
+        .clone();
+    base["packages"].as_array_mut().unwrap().push(entry);
+    toml::to_string(&base).unwrap()
+}
+
+/// Publishes an `api-b` 0.1.0 that depends on `lib-shared` with the given requirement.
+fn publish_api_b(root: &Path, buffrs_home: &Path, registry_url: &str, lib_shared_req: &str) {
+    publish(
+        root,
+        buffrs_home,
+        registry_url,
+        "api",
+        "api-b",
+        "0.1.0",
+        &remote("lib-shared", lib_shared_req, registry_url),
+    );
+}
+
+/// Overwrites the published `{name}@{version}` with an archive of different content, as a
+/// registry that accepts overwrites would, and returns the digest of the new archive.
+fn republish_changed(
+    root: &Path,
+    buffrs_home: &Path,
+    registry_url: &str,
+    name: &str,
+    version: &str,
+) -> String {
+    use sha2::Digest;
+
+    let package_dir = root.join(format!("{REPOSITORY}-{name}-{version}"));
+    let proto = package_dir.join("proto/messages.proto");
+    let changed = std::fs::read_to_string(&proto)
+        .unwrap()
+        .replace("string id = 1;", "string id = 1;\n    string note = 2;");
+    std::fs::write(&proto, changed).unwrap();
+
+    let output_dir = root.join(format!("{name}-{version}-changed"));
+    std::fs::create_dir(&output_dir).unwrap();
+    crate::cli!()
+        .args(["package", "--output-directory"])
+        .arg(&output_dir)
+        .env("BUFFRS_HOME", buffrs_home)
+        .current_dir(&package_dir)
+        .assert()
+        .success();
+
+    let archive = std::fs::read(output_dir.join(format!("{name}-{version}.tgz"))).unwrap();
+    put(
+        &format!("{registry_url}/{REPOSITORY}/{name}/{name}-{version}.tgz"),
+        &archive,
+    );
+    format!("sha256:{}", hex::encode(sha2::Sha256::digest(&archive)))
+}
+
+/// Uploads `body` to `url` with a plain HTTP request.
+fn put(url: &str, body: &[u8]) {
+    use std::io::{Read, Write};
+
+    let (host, path) = url
+        .strip_prefix("http://")
+        .and_then(|rest| rest.split_once('/'))
+        .unwrap();
+    let mut stream = std::net::TcpStream::connect(host).unwrap();
+    write!(
+        stream,
+        "PUT /{path} HTTP/1.1\r\nHost: {host}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )
+    .unwrap();
+    stream.write_all(body).unwrap();
+
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
 }
 
 /// Publishes `lib-shared` 0.1.0 and 0.1.1 and an `api-a` 0.1.0 that accepts either.
@@ -428,7 +593,7 @@ fn removed_locked_version_is_resolved_against_the_registry() {
 }
 
 #[test]
-fn unlocked_versions_are_downloaded_once() {
+fn resolution_downloads_only_the_versions_it_chooses() {
     with_probed_test_registry(|registry_url, probe| {
         let vfs = VirtualFileSystem::empty();
         let buffrs_home = vfs.root().join("$HOME");
@@ -437,16 +602,286 @@ fn unlocked_versions_are_downloaded_once() {
         publish_api_with_two_lib_versions(&root, &buffrs_home, registry_url);
         let consumer_dir = consumer(&root, &remote("api-a", "^0.1", registry_url));
 
+        // lib-shared 0.1.0 also satisfies api-a, but resolution never needs its manifest.
         probe.clear();
         install(&consumer_dir, &buffrs_home);
         assert_eq!(
-            sorted_downloads(&probe.get_requests()),
+            probe.get_requests(),
             [
+                listing_path("api-a"),
                 artifact_path("api-a", "0.1.0"),
-                artifact_path("lib-shared", "0.1.0"),
+                listing_path("lib-shared"),
                 artifact_path("lib-shared", "0.1.1"),
             ]
         );
+    });
+}
+
+#[test]
+fn locked_install_makes_the_requests_of_a_current_lockfile() {
+    with_probed_test_registry(|registry_url, probe| {
+        let vfs = VirtualFileSystem::empty();
+        let buffrs_home = vfs.root().join("$HOME");
+        let root = vfs.root();
+
+        publish_api_with_two_lib_versions(&root, &buffrs_home, registry_url);
+        let consumer_dir = consumer(&root, &remote("api-a", "^0.1", registry_url));
+        install(&consumer_dir, &buffrs_home);
+        let lock = read_lock(&consumer_dir);
+
+        remove_cache(&buffrs_home);
+        probe.clear();
+        install(&consumer_dir, &buffrs_home);
+        let unlocked_requests = probe.get_requests();
+
+        remove_cache(&buffrs_home);
+        probe.clear();
+        install_locked(&consumer_dir, &buffrs_home);
+        assert_eq!(probe.get_requests(), unlocked_requests);
+        assert_eq!(
+            unlocked_requests,
+            [
+                artifact_path("api-a", "0.1.0"),
+                artifact_path("lib-shared", "0.1.1")
+            ]
+        );
+        assert_eq!(read_lock(&consumer_dir), lock);
+    });
+}
+
+#[test]
+fn locked_install_leaves_the_lockfile_unchanged() {
+    with_probed_test_registry(|registry_url, _| {
+        let vfs = VirtualFileSystem::empty();
+        let buffrs_home = vfs.root().join("$HOME");
+        let root = vfs.root();
+
+        publish_api_with_two_lib_versions(&root, &buffrs_home, registry_url);
+        publish_api_b(&root, &buffrs_home, registry_url, "^0.1");
+        let consumer_dir = consumer(&root, &remote("api-a", "^0.1", registry_url));
+        install(&consumer_dir, &buffrs_home);
+        let api_b_dir = consumer_named(
+            &root,
+            "api-b-consumer",
+            &remote("api-b", "^0.1", registry_url),
+        );
+        install(&api_b_dir, &buffrs_home);
+
+        // An entry no dependency uses, which an unlocked install removes.
+        let lock = lock_with_entry_from(&read_lock(&consumer_dir), &read_lock(&api_b_dir), "api-b");
+        std::fs::write(consumer_dir.join("Proto.lock"), &lock).unwrap();
+
+        install_locked(&consumer_dir, &buffrs_home);
+        assert_eq!(read_lock(&consumer_dir), lock);
+    });
+}
+
+#[test]
+fn locked_install_fails_for_a_dependency_missing_from_the_lockfile() {
+    with_probed_test_registry(|registry_url, _| {
+        let vfs = VirtualFileSystem::empty();
+        let buffrs_home = vfs.root().join("$HOME");
+        let root = vfs.root();
+
+        publish_api_with_two_lib_versions(&root, &buffrs_home, registry_url);
+        publish_api_b(&root, &buffrs_home, registry_url, "^0.1");
+        let api_a = remote("api-a", "^0.1", registry_url);
+        let consumer_dir = consumer(&root, &api_a);
+        install(&consumer_dir, &buffrs_home);
+        let lock = read_lock(&consumer_dir);
+
+        let api_b = remote("api-b", "^0.1", registry_url);
+        write_consumer_manifest(&consumer_dir, &format!("{api_a}\n{api_b}"));
+        let stderr = locked_install_fails(&consumer_dir, &buffrs_home, &["--locked"], &[]);
+        assert!(
+            stderr.contains("api-b ^0.1 has no matching entry in Proto.lock"),
+            "{stderr}"
+        );
+        assert_eq!(read_lock(&consumer_dir), lock);
+    });
+}
+
+#[test]
+fn locked_install_fails_when_the_lockfile_does_not_satisfy_the_manifests() {
+    with_probed_test_registry(|registry_url, _| {
+        let vfs = VirtualFileSystem::empty();
+        let buffrs_home = vfs.root().join("$HOME");
+        let root = vfs.root();
+
+        publish_api_with_two_lib_versions(&root, &buffrs_home, registry_url);
+        publish_api_b(&root, &buffrs_home, registry_url, "=0.1.0");
+        let api_a = remote("api-a", "^0.1", registry_url);
+        let api_b = remote("api-b", "^0.1", registry_url);
+
+        // Locks lib-shared 0.1.1 for api-a, and api-b, which needs lib-shared 0.1.0.
+        let consumer_dir = consumer(&root, &api_a);
+        install(&consumer_dir, &buffrs_home);
+        let api_b_dir = consumer_named(&root, "api-b-consumer", &api_b);
+        install(&api_b_dir, &buffrs_home);
+        let lock = lock_with_entry_from(&read_lock(&consumer_dir), &read_lock(&api_b_dir), "api-b");
+        std::fs::write(consumer_dir.join("Proto.lock"), &lock).unwrap();
+
+        write_consumer_manifest(&consumer_dir, &format!("{api_a}\n{api_b}"));
+        let stderr = locked_install_fails(&consumer_dir, &buffrs_home, &["--locked"], &[]);
+        assert!(
+            stderr.contains("Proto.lock does not satisfy the manifests"),
+            "{stderr}"
+        );
+        assert_eq!(read_lock(&consumer_dir), lock);
+
+        // Without --locked the same install resolves again.
+        install(&consumer_dir, &buffrs_home);
+        assert_eq!(locked_version(&consumer_dir, "lib-shared"), "0.1.0");
+    });
+}
+
+#[test]
+fn locked_install_fails_when_a_locked_artifact_is_missing() {
+    with_probed_test_registry(|registry_url, probe| {
+        let vfs = VirtualFileSystem::empty();
+        let buffrs_home = vfs.root().join("$HOME");
+        let root = vfs.root();
+
+        publish_api_with_two_lib_versions(&root, &buffrs_home, registry_url);
+        let consumer_dir = consumer(&root, &remote("api-a", "^0.1", registry_url));
+        install(&consumer_dir, &buffrs_home);
+        let lock = read_lock(&consumer_dir);
+
+        probe.hide(&artifact_path("lib-shared", "0.1.1"));
+        remove_cache(&buffrs_home);
+        let stderr = locked_install_fails(&consumer_dir, &buffrs_home, &["--locked"], &[]);
+        assert!(
+            stderr.contains(&format!(
+                "lib-shared@0.1.1 is pinned by Proto.lock but is missing from repository {REPOSITORY} and from the cache"
+            )),
+            "{stderr}"
+        );
+        assert_eq!(read_lock(&consumer_dir), lock);
+    });
+}
+
+#[test]
+fn locked_install_rejects_an_artifact_that_differs_from_the_lockfile() {
+    with_probed_test_registry(|registry_url, _| {
+        let vfs = VirtualFileSystem::empty();
+        let buffrs_home = vfs.root().join("$HOME");
+        let root = vfs.root();
+
+        publish_api_with_two_lib_versions(&root, &buffrs_home, registry_url);
+        let consumer_dir = consumer(&root, &remote("api-a", "^0.1", registry_url));
+        install(&consumer_dir, &buffrs_home);
+        let lock = read_lock(&consumer_dir);
+        let locked_digest = locked_field(&consumer_dir, "lib-shared", "digest");
+
+        let republished_digest =
+            republish_changed(&root, &buffrs_home, registry_url, "lib-shared", "0.1.1");
+        assert_ne!(republished_digest, locked_digest);
+        remove_cache(&buffrs_home);
+
+        let stderr = locked_install_fails(&consumer_dir, &buffrs_home, &["--locked"], &[]);
+        assert!(
+            stderr.contains(&format!(
+                "lib-shared@0.1.1 in repository {REPOSITORY} has digest {republished_digest}, but Proto.lock pins digest {locked_digest}"
+            )),
+            "{stderr}"
+        );
+        assert_eq!(read_lock(&consumer_dir), lock);
+
+        // Without --locked the install warns and locks the new digest.
+        let output = install_output(&consumer_dir, &buffrs_home, &[], &[]);
+        assert!(
+            output.contains(&format!(
+                "lib-shared@0.1.1 in repository {REPOSITORY} differs from the digest in Proto.lock"
+            )),
+            "{output}"
+        );
+        assert_eq!(
+            locked_field(&consumer_dir, "lib-shared", "digest"),
+            republished_digest
+        );
+    });
+}
+
+#[test]
+fn buffrs_locked_variable_locks_the_install() {
+    with_probed_test_registry(|registry_url, _| {
+        let vfs = VirtualFileSystem::empty();
+        let buffrs_home = vfs.root().join("$HOME");
+        let root = vfs.root();
+
+        publish_api_with_two_lib_versions(&root, &buffrs_home, registry_url);
+        publish_api_b(&root, &buffrs_home, registry_url, "^0.1");
+        let api_a = remote("api-a", "^0.1", registry_url);
+        let consumer_dir = consumer(&root, &api_a);
+        install(&consumer_dir, &buffrs_home);
+        let lock = read_lock(&consumer_dir);
+
+        let api_b = remote("api-b", "^0.1", registry_url);
+        write_consumer_manifest(&consumer_dir, &format!("{api_a}\n{api_b}"));
+
+        for value in ["1", "TRUE"] {
+            let stderr = locked_install_fails(
+                &consumer_dir,
+                &buffrs_home,
+                &[],
+                &[("BUFFRS_LOCKED", value)],
+            );
+            assert!(
+                stderr.contains("api-b ^0.1 has no matching entry in Proto.lock"),
+                "{stderr}"
+            );
+            assert_eq!(read_lock(&consumer_dir), lock);
+        }
+
+        let stderr = locked_install_fails(
+            &consumer_dir,
+            &buffrs_home,
+            &[],
+            &[("BUFFRS_LOCKED", "yes")],
+        );
+        assert!(
+            stderr.contains("BUFFRS_LOCKED must be 1, true, 0 or false"),
+            "{stderr}"
+        );
+
+        install_output(&consumer_dir, &buffrs_home, &[], &[("BUFFRS_LOCKED", "0")]);
+        assert_eq!(locked_version(&consumer_dir, "api-b"), "0.1.0");
+    });
+}
+
+#[test]
+fn legacy_resolver_honors_a_locked_install() {
+    with_probed_test_registry(|registry_url, probe| {
+        let vfs = VirtualFileSystem::empty();
+        let buffrs_home = vfs.root().join("$HOME");
+        let root = vfs.root();
+
+        publish_api_with_two_lib_versions(&root, &buffrs_home, registry_url);
+        publish_api_b(&root, &buffrs_home, registry_url, "^0.1");
+        let api_a = remote("api-a", "^0.1", registry_url);
+        let consumer_dir = consumer(&root, &api_a);
+        write_config_text(&consumer_dir, "edition = \"0.10\"\n");
+        install(&consumer_dir, &buffrs_home);
+        let lock = read_lock(&consumer_dir);
+
+        let api_b = remote("api-b", "^0.1", registry_url);
+        write_consumer_manifest(&consumer_dir, &format!("{api_a}\n{api_b}"));
+        let stderr = locked_install_fails(&consumer_dir, &buffrs_home, &["--locked"], &[]);
+        assert!(
+            stderr.contains("api-b ^0.1 has no matching entry in Proto.lock"),
+            "{stderr}"
+        );
+        assert_eq!(read_lock(&consumer_dir), lock);
+
+        write_consumer_manifest(&consumer_dir, &api_a);
+        probe.hide(&artifact_path("lib-shared", "0.1.1"));
+        remove_cache(&buffrs_home);
+        let stderr = locked_install_fails(&consumer_dir, &buffrs_home, &["--locked"], &[]);
+        assert!(
+            stderr.contains("lib-shared@0.1.1 is pinned by Proto.lock but is missing"),
+            "{stderr}"
+        );
+        assert_eq!(read_lock(&consumer_dir), lock);
     });
 }
 
@@ -714,6 +1149,72 @@ fn package_required_from_two_repositories_installs_from_the_lockfile() {
             ]
         );
         assert_eq!(lock, read_lock(&consumer_dir));
+
+        // A locked install accepts the repository locked for either requester.
+        install_locked(&consumer_dir, &buffrs_home);
+        assert_eq!(lock, read_lock(&consumer_dir));
+        remove_cache(&buffrs_home);
+        install_locked(&consumer_dir, &buffrs_home);
+        assert_eq!(lock, read_lock(&consumer_dir));
+    });
+}
+
+#[test]
+fn locked_install_rejects_a_dependency_moved_to_another_repository() {
+    const MIRROR: &str = "mirror";
+
+    with_probed_test_registry(|registry_url, _| {
+        let vfs = VirtualFileSystem::empty();
+        let buffrs_home = vfs.root().join("$HOME");
+        let root = vfs.root();
+
+        for repository in [REPOSITORY, MIRROR] {
+            publish_to(
+                &root,
+                &buffrs_home,
+                registry_url,
+                repository,
+                ("lib", "lib-shared", "0.1.0"),
+                "",
+            );
+        }
+
+        let consumer_dir = consumer(&root, &remote("lib-shared", "^0.1", registry_url));
+        install(&consumer_dir, &buffrs_home);
+        assert_eq!(
+            locked_field(&consumer_dir, "lib-shared", "repository"),
+            REPOSITORY
+        );
+        let lock = read_lock(&consumer_dir);
+
+        write_consumer_manifest(
+            &consumer_dir,
+            &remote_in(MIRROR, "lib-shared", "^0.1", registry_url),
+        );
+        let stderr = locked_install_fails(&consumer_dir, &buffrs_home, &["--locked"], &[]);
+        assert!(
+            stderr.contains(&format!(
+                "lib-shared@0.1.0 is locked to repository {REPOSITORY} in Proto.lock, but the manifests request it from repository {MIRROR}, and a locked install cannot change its repository"
+            )),
+            "{stderr}"
+        );
+        assert_eq!(read_lock(&consumer_dir), lock);
+
+        // The legacy resolver finds no lock entry in the requested repository.
+        write_config_text(&consumer_dir, "edition = \"0.10\"\n");
+        let stderr = locked_install_fails(&consumer_dir, &buffrs_home, &["--locked"], &[]);
+        assert!(
+            stderr.contains("lib-shared ^0.1 has no matching entry in Proto.lock"),
+            "{stderr}"
+        );
+        assert_eq!(read_lock(&consumer_dir), lock);
+
+        write_config(&consumer_dir);
+        install(&consumer_dir, &buffrs_home);
+        assert_eq!(
+            locked_field(&consumer_dir, "lib-shared", "repository"),
+            MIRROR
+        );
     });
 }
 

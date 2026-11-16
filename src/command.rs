@@ -374,6 +374,47 @@ pub async fn publish(
     artifactory.publish(package, repository).await
 }
 
+/// Environment variable that makes `buffrs install` run as if `--locked` were passed.
+///
+/// `1` or `true` turns locked mode on, `0` or `false` leaves it off, and an empty or unset
+/// variable means no preference. Case is ignored.
+pub const LOCKED_ENV_VAR: &str = "BUFFRS_LOCKED";
+
+/// Reads [`LOCKED_ENV_VAR`].
+///
+/// Returns `None` if the variable is unset or empty, and an error if its value is not one of
+/// `1`, `true`, `0` or `false`.
+pub fn locked_from_env() -> miette::Result<Option<bool>> {
+    let value = match std::env::var(LOCKED_ENV_VAR) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            bail!("{LOCKED_ENV_VAR} must be 1, true, 0 or false")
+        }
+    };
+
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" => Ok(None),
+        "1" | "true" => Ok(Some(true)),
+        "0" | "false" => Ok(Some(false)),
+        _ => bail!("{LOCKED_ENV_VAR} must be 1, true, 0 or false, not {value:?}"),
+    }
+}
+
+/// Options for [`install_with_options`]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct InstallOptions {
+    /// Install exactly what `Proto.lock` pins and leave it unchanged.
+    ///
+    /// The install fails, naming the package, when a remote dependency has no matching lock
+    /// entry, when the lock entry's repository is not one the manifests request the package
+    /// from, when the locked versions do not satisfy the manifests, when a locked artifact is
+    /// missing from the registry and from the cache, or when a downloaded artifact differs from
+    /// the digest in `Proto.lock`. Setting [`LOCKED_ENV_VAR`] to `1` or `true` has the same
+    /// effect.
+    pub locked: bool,
+}
+
 /// Install mode for dependencies
 pub enum InstallMode {
     /// Only install dependencies, not the package itself
@@ -490,6 +531,8 @@ fn dependant_counts_from_edges<'a>(
 
 /// Installs dependencies
 ///
+/// Same as [`install_with_options`] with default options.
+///
 /// # Arguments
 /// * `mode` - The install mode (dependencies only or all)
 /// * `generation` - Flags for generation of files
@@ -500,6 +543,27 @@ pub async fn install(
     config: &Config,
     policy: CertValidationPolicy,
 ) -> miette::Result<()> {
+    install_with_options(mode, generation, config, policy, InstallOptions::default()).await
+}
+
+/// Installs dependencies
+///
+/// The install is locked if `options.locked` is set or [`LOCKED_ENV_VAR`] turns it on. A
+/// locked install does not write `Proto.lock`.
+///
+/// # Arguments
+/// * `mode` - The install mode (dependencies only or all)
+/// * `generation` - Flags for generation of files
+/// * `config` - The configuration
+/// * `options` - How to install
+pub async fn install_with_options(
+    mode: InstallMode,
+    generation: &[GenerationOption],
+    config: &Config,
+    policy: CertValidationPolicy,
+    options: InstallOptions,
+) -> miette::Result<()> {
+    let locked_install = options.locked || locked_from_env()? == Some(true);
     let manifest = Manifest::read(config).await?;
     let lockfile = Lockfile::read_or_default().await?;
     let store = PackageStore::current().await?;
@@ -530,6 +594,7 @@ pub async fn install(
     let dependency_graph =
         DependencyGraphBuilder::new(&manifest, &lockfile, &credentials, &cache, config, policy)
             .with_client(http_client)
+            .locked(locked_install)
             .build()
             .await
             .wrap_err(miette!("dependency resolution failed"))?;
@@ -835,6 +900,10 @@ pub async fn install(
                 buf_yaml::generate_buf_yaml_file(&dependency_graph, &manifest, &store)?;
             }
         }
+    }
+
+    if locked_install {
+        return Ok(());
     }
 
     Lockfile::from_iter(locked.into_iter()).write().await

@@ -9,6 +9,7 @@ precedence over configuration file settings.
 - [`BUFFRS_CACHE`](#buffrs_cache) — Location of the package cache
 - [`BUFFRS_HTTP_CONNECT_TIMEOUT`](#buffrs_http_connect_timeout) — Time allowed for connecting to a registry
 - [`BUFFRS_HTTP_TIMEOUT`](#buffrs_http_timeout) — Time a registry may stay silent during a request
+- [`BUFFRS_LOCKED`](#buffrs_locked) — Install exactly what `Proto.lock` pins
 - [`BUFFRS_TESTSUITE`](#buffrs_testsuite) — Skip git dirty checks in tests
 
 ## Reference
@@ -80,6 +81,22 @@ $env:BUFFRS_HTTP_TIMEOUT = "120"
 
 ```bash
 export BUFFRS_HTTP_TIMEOUT=120
+```
+
+### `BUFFRS_LOCKED`
+
+`1` or `true` makes `buffrs install` run as if
+[`--locked`](../commands/buffrs-install.md#locked-installs) were passed. `0`, `false`, an
+empty value or no value leave it off, and any other value fails the install. Case is ignored.
+
+**Default:** Not set
+
+```powershell
+$env:BUFFRS_LOCKED = "1"
+```
+
+```bash
+export BUFFRS_LOCKED=1
 ```
 
 ### `BUFFRS_TESTSUITE`

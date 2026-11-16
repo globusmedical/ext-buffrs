@@ -14,13 +14,16 @@ use crate::{
     cache::{Cache, Entry},
     config::Config,
     credentials::Credentials,
-    lock::{FileRequirement, Lockfile},
+    lock::{DigestAlgorithm, FileRequirement, LockedPackage, Lockfile},
     manifest::{
         Dependency, DependencyManifest, LocalDependencyManifest, Manifest, NamespaceOverlapPolicy,
         RemoteDependencyManifest, ResolverMode, MANIFEST_FILE,
     },
     package::{Package, PackageName, PackageStore},
-    pubgrub_resolver::{BuffrsDependencyProvider, PackageDependency, PackageInfo},
+    pubgrub_resolver::{
+        BuffrsDependencyProvider, PackageDependency, PackageInfo, PackageSource, ResolutionResult,
+        SourceAborted, SourcePackage,
+    },
     registry::{Artifactory, CertValidationPolicy, DownloadFailure, RegistryRef, RegistryUri},
     version::{extract_exact_version, is_exact_requirement, select_version},
 };
@@ -170,10 +173,104 @@ pub struct DependencyGraphBuilder<'a> {
     client: Option<reqwest::Client>,
     /// Remote packages fetched during this build, so that no version is downloaded twice.
     fetched: Mutex<HashMap<FetchKey, Package>>,
+    /// Install exactly what `Proto.lock` pins, failing where it cannot be used as is.
+    locked: bool,
 }
 
 /// Registry URL, repository, package name and version of a fetched remote package.
 type FetchKey = (String, String, PackageName, Version);
+
+/// What the remote packages of a `PubGrub` build are fetched from, kept across resolution passes.
+#[derive(Default)]
+struct Discovery {
+    /// Manifest of each remote package, as first named by the root or a fetched package
+    manifests: HashMap<PackageName, RemoteDependencyManifest>,
+    /// Versions listed by the registry for each package
+    listings: HashMap<PackageName, Vec<Version>>,
+    /// Whether locked packages offer their locked version as the only candidate
+    use_lock: bool,
+    /// Number of packages offering their locked version in the current pass
+    locked_candidates: usize,
+    /// Registry and repository of every manifest that names each remote package
+    requested: HashMap<PackageName, Vec<(RegistryRef, String)>>,
+    /// The `Proto.lock` entry offered as the only candidate of each package in the current pass
+    locked_entries: HashMap<PackageName, LockedPackage>,
+}
+
+impl Discovery {
+    /// Records a manifest naming a remote package. The first one is the package's manifest.
+    fn request(&mut self, name: &PackageName, manifest: &RemoteDependencyManifest) {
+        let requested = self.requested.entry(name.clone()).or_default();
+        let source = (manifest.registry.clone(), manifest.repository.clone());
+        if !requested.contains(&source) {
+            requested.push(source);
+        }
+
+        self.manifests
+            .entry(name.clone())
+            .or_insert_with(|| manifest.clone());
+    }
+
+    /// The dependencies of a fetched remote package, remembering the manifests of its remote
+    /// dependencies.
+    fn dependencies_of(&mut self, package: &Package) -> Vec<PackageDependency> {
+        package
+            .manifest
+            .dependencies
+            .iter()
+            .map(|dependency| match &dependency.manifest {
+                DependencyManifest::Remote(manifest) => {
+                    self.request(&dependency.package, manifest);
+
+                    PackageDependency {
+                        package: dependency.package.clone(),
+                        version_req: manifest.version.clone(),
+                    }
+                }
+                DependencyManifest::Local(manifest) => PackageDependency {
+                    package: dependency.package.clone(),
+                    version_req: manifest
+                        .publish
+                        .as_ref()
+                        .map_or(VersionReq::STAR, |publish| publish.version.clone()),
+                },
+            })
+            .collect()
+    }
+}
+
+/// A metadata request from the resolution thread, answered by the async build.
+enum SourceRequest {
+    Versions(PackageName, Reply<Option<SourcePackage>>),
+    Dependencies(PackageName, Version, Reply<Option<Vec<PackageDependency>>>),
+}
+
+type Reply<T> = std::sync::mpsc::Sender<Result<T, SourceAborted>>;
+
+/// A [`PackageSource`] that forwards each request to the async build and blocks until it replies.
+struct ChannelSource(tokio::sync::mpsc::UnboundedSender<SourceRequest>);
+
+impl ChannelSource {
+    fn ask<T>(&self, request: impl FnOnce(Reply<T>) -> SourceRequest) -> Result<T, SourceAborted> {
+        let (reply, answer) = std::sync::mpsc::channel();
+        self.0.send(request(reply)).map_err(|_| SourceAborted)?;
+        answer.recv().map_err(|_| SourceAborted)?
+    }
+}
+
+impl PackageSource for ChannelSource {
+    fn versions(&self, name: &PackageName) -> Result<Option<SourcePackage>, SourceAborted> {
+        self.ask(|reply| SourceRequest::Versions(name.clone(), reply))
+    }
+
+    fn dependencies(
+        &self,
+        name: &PackageName,
+        version: &Version,
+    ) -> Result<Option<Vec<PackageDependency>>, SourceAborted> {
+        self.ask(|reply| SourceRequest::Dependencies(name.clone(), version.clone(), reply))
+    }
+}
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct RemoteDependency {
@@ -397,7 +494,21 @@ impl<'a> DependencyGraphBuilder<'a> {
             policy,
             client: None,
             fetched: Mutex::new(HashMap::new()),
+            locked: false,
         }
+    }
+
+    /// Makes the build use exactly what `Proto.lock` pins.
+    ///
+    /// The build then fails, naming the package, when a remote dependency has no matching lock
+    /// entry, when the lock entry's repository is not one the manifests request the package
+    /// from, when the locked versions do not satisfy the manifests, when a locked artifact is
+    /// missing from the registry and from the cache, or when a downloaded artifact differs from
+    /// the digest in `Proto.lock`.
+    #[must_use]
+    pub fn locked(mut self, locked: bool) -> Self {
+        self.locked = locked;
+        self
     }
 
     /// Sets a shared HTTP client for connection pooling.
@@ -913,17 +1024,31 @@ impl<'a> DependencyGraphBuilder<'a> {
                     version: dependency.manifest.version.clone(),
                 })?;
 
-            let package = registry
-                .download_version(
+            let package = match registry
+                .try_download_version(
                     &dependency.manifest.repository,
                     &dependency.package,
                     &local_locked.version,
                 )
                 .await
-                .wrap_err(DownloadError {
-                    name: dependency.package.clone(),
-                    version: dependency.manifest.version.clone(),
-                })?;
+            {
+                Ok(package) => package,
+                Err(DownloadFailure::NotFound(_)) if self.locked => {
+                    return Err(Self::missing_locked_artifact(
+                        &dependency.package,
+                        &local_locked.version,
+                        &dependency.manifest.repository,
+                    ));
+                }
+                Err(e) => {
+                    return Err(e.into_report()).wrap_err(DownloadError {
+                        name: dependency.package.clone(),
+                        version: dependency.manifest.version.clone(),
+                    })
+                }
+            };
+
+            self.check_digest(local_locked, &package, &dependency.manifest.repository)?;
 
             let file_requirement = FileRequirement::try_from(local_locked)?;
             self.cache
@@ -933,6 +1058,10 @@ impl<'a> DependencyGraphBuilder<'a> {
 
             Ok(package)
         } else {
+            if self.locked {
+                return Err(Self::not_locked(&dependency.package, version_req));
+            }
+
             // Package not present in lockfile (and thus not in cache)
             // => resolve version and download from the registry
             let registry = self
@@ -1077,10 +1206,6 @@ impl<'a> DependencyGraphBuilder<'a> {
         let mut local_packages: HashMap<PackageName, (Package, PathBuf, LocalDependencyManifest)> =
             HashMap::new();
 
-        // Preferred versions for reproducible installs (from Proto.lock).
-        // Applied to the PubGrub provider as a soft preference.
-        let mut preferred_versions: HashMap<PackageName, Version> = HashMap::new();
-
         for dependency in &self.manifest.dependencies {
             match &dependency.manifest {
                 DependencyManifest::Remote(manifest) => {
@@ -1090,17 +1215,6 @@ impl<'a> DependencyGraphBuilder<'a> {
                     });
                     remote_deps_to_discover
                         .push_back((dependency.package.clone(), manifest.clone()));
-
-                    if let Some(locked) = self.lockfile.find(
-                        &dependency.package,
-                        &manifest.version,
-                        Some(&manifest.registry),
-                        None,
-                    ) {
-                        preferred_versions
-                            .entry(dependency.package.clone())
-                            .or_insert_with(|| locked.version.clone());
-                    }
                 }
                 DependencyManifest::Local(manifest) => {
                     // Read local package manifest to get its version
@@ -1160,17 +1274,6 @@ impl<'a> DependencyGraphBuilder<'a> {
                             DependencyManifest::Remote(sub_manifest) => {
                                 remote_deps_to_discover
                                     .push_back((sub_dep.package.clone(), sub_manifest.clone()));
-
-                                if let Some(locked) = self.lockfile.find(
-                                    &sub_dep.package,
-                                    &sub_manifest.version,
-                                    Some(&sub_manifest.registry),
-                                    None,
-                                ) {
-                                    preferred_versions
-                                        .entry(sub_dep.package.clone())
-                                        .or_insert_with(|| locked.version.clone());
-                                }
                             }
                             DependencyManifest::Local(sub_manifest) => {
                                 // Queue transitive local deps for discovery
@@ -1241,17 +1344,6 @@ impl<'a> DependencyGraphBuilder<'a> {
                     DependencyManifest::Remote(sub_manifest) => {
                         remote_deps_to_discover
                             .push_back((sub_dep.package.clone(), sub_manifest.clone()));
-
-                        if let Some(locked) = self.lockfile.find(
-                            &sub_dep.package,
-                            &sub_manifest.version,
-                            Some(&sub_manifest.registry),
-                            None,
-                        ) {
-                            preferred_versions
-                                .entry(sub_dep.package.clone())
-                                .or_insert_with(|| locked.version.clone());
-                        }
                     }
                     DependencyManifest::Local(sub_manifest) => {
                         if !local_packages.contains_key(&sub_dep.package)
@@ -1270,26 +1362,28 @@ impl<'a> DependencyGraphBuilder<'a> {
             local_packages.insert(pkg_name, (package, abs_manifest_dir, manifest));
         }
 
-        // Phases 2 and 3 run once with the locked versions as the only candidates, which needs
-        // no registry listing, and again against the full registry if those versions no longer
+        // Remote packages are listed and downloaded only when PubGrub first needs them, from the
+        // registry and repository of the first manifest that names them.
+        let mut discovery = Discovery::default();
+        for (name, manifest) in &remote_deps_to_discover {
+            discovery.request(name, manifest);
+        }
+
+        // Resolution runs once with the locked versions as the only candidates, which needs no
+        // registry listing, and again against the full registry if those versions no longer
         // satisfy the manifests.
         let mut use_lock = true;
         let resolved = loop {
-            // Phase 2: Discover all remote packages and their metadata
+            discovery.use_lock = use_lock;
+            discovery.locked_candidates = 0;
+            discovery.locked_entries.clear();
+
             let provider = BuffrsDependencyProvider::new(root_deps.clone());
-            let mut discovered: HashSet<PackageName> = HashSet::new();
-            let mut remote_deps_to_discover = remote_deps_to_discover.clone();
-            let mut locked_candidates = 0_usize;
 
-            for (name, version) in &preferred_versions {
-                provider.set_preferred_version(name.clone(), version.clone());
-            }
-
-            // Add local packages to provider first (they have exactly one version)
+            // Local packages have exactly one version
             for (name, (package, _, _)) in &local_packages {
                 let version = package.version().clone();
 
-                // Collect dependencies from local package
                 let mut pkg_deps = Vec::new();
                 for dep in &package.manifest.dependencies {
                     match &dep.manifest {
@@ -1313,223 +1407,40 @@ impl<'a> DependencyGraphBuilder<'a> {
                     }
                 }
 
-                let mut dependencies_map = HashMap::new();
-                dependencies_map.insert(version.clone(), pkg_deps);
-
                 provider.add_package(
                     name.clone(),
                     PackageInfo {
-                        versions: vec![version],
-                        dependencies: dependencies_map,
-                    },
-                );
-                discovered.insert(name.clone());
-            }
-
-            // Discover remote packages
-            while !remote_deps_to_discover.is_empty() {
-                let (pkg_name, manifest) = remote_deps_to_discover
-                    .pop_front()
-                    .expect("queue is non-empty");
-
-                if discovered.contains(&pkg_name) {
-                    continue;
-                }
-                discovered.insert(pkg_name.clone());
-
-                let locked = self.lockfile.find(
-                    &pkg_name,
-                    &manifest.version,
-                    Some(&manifest.registry),
-                    None,
-                );
-
-                if let Some(locked) = locked {
-                    provider.set_preferred_version(pkg_name.clone(), locked.version.clone());
-                }
-
-                tracing::debug!("Discovering package: {}", pkg_name);
-
-                // A locked package offers its locked version as the only candidate. Its manifest
-                // comes from the cache or a single download, so an install whose Proto.lock is
-                // current neither lists nor downloads the other versions in the registry.
-                //
-                // If the registry no longer has the locked version, this package alone is
-                // resolved against the versions the registry lists.
-                let locked_package = match locked.filter(|_| use_lock) {
-                    Some(locked) => {
-                        let package = self
-                            .try_fetch_remote(&pkg_name, &manifest, &locked.version)
-                            .await
-                            .wrap_err(DownloadError {
-                                name: pkg_name.clone(),
-                                version: manifest.version.clone(),
-                            })?;
-
-                        if package.is_none() {
-                            tracing::warn!(
-                                "{}@{} is pinned by Proto.lock but no longer in repository {}, resolving it against the registry",
-                                pkg_name,
-                                locked.version,
-                                manifest.repository
-                            );
-                        }
-
-                        package.map(|package| (locked, package))
-                    }
-                    None => None,
-                };
-
-                if let Some((locked, package)) = locked_package {
-                    let mut pkg_deps = Vec::new();
-                    for dep in &package.manifest.dependencies {
-                        match &dep.manifest {
-                            DependencyManifest::Remote(dep_manifest) => {
-                                pkg_deps.push(PackageDependency {
-                                    package: dep.package.clone(),
-                                    version_req: dep_manifest.version.clone(),
-                                });
-
-                                if !discovered.contains(&dep.package) {
-                                    remote_deps_to_discover
-                                        .push_back((dep.package.clone(), dep_manifest.clone()));
-                                }
-                            }
-                            DependencyManifest::Local(dep_manifest) => {
-                                let sub_version_req = dep_manifest
-                                    .publish
-                                    .as_ref()
-                                    .map_or(VersionReq::STAR, |p| p.version.clone());
-                                pkg_deps.push(PackageDependency {
-                                    package: dep.package.clone(),
-                                    version_req: sub_version_req,
-                                });
-                            }
-                        }
-                    }
-
-                    locked_candidates += 1;
-                    provider.add_package(
-                        pkg_name,
-                        PackageInfo {
-                            versions: vec![locked.version.clone()],
-                            dependencies: HashMap::from([(locked.version.clone(), pkg_deps)]),
-                        },
-                    );
-                    continue;
-                }
-
-                // Create registry client
-                let registry = self.create_artifactory(manifest.registry.clone().try_into()?)?;
-
-                // Get all available versions
-                let versions = registry
-                    .list_versions(manifest.repository.clone(), pkg_name.clone())
-                    .await?;
-
-                if versions.is_empty() {
-                    miette::bail!(
-                        "no versions of {} found in repository {}",
-                        pkg_name,
-                        manifest.repository
-                    );
-                }
-
-                // Fetch dependencies for each version
-                let mut dependencies_map: HashMap<Version, Vec<PackageDependency>> = HashMap::new();
-
-                for version in &versions {
-                    // Download package to get its manifest
-                    match registry
-                        .try_download_version(&manifest.repository, &pkg_name, version)
-                        .await
-                    {
-                        Ok(package) => {
-                            self.remember(&manifest, &package).await;
-
-                            let mut pkg_deps = Vec::new();
-                            for dep in &package.manifest.dependencies {
-                                match &dep.manifest {
-                                    DependencyManifest::Remote(dep_manifest) => {
-                                        pkg_deps.push(PackageDependency {
-                                            package: dep.package.clone(),
-                                            version_req: dep_manifest.version.clone(),
-                                        });
-
-                                        // Add to discovery queue
-                                        if !discovered.contains(&dep.package) {
-                                            remote_deps_to_discover.push_back((
-                                                dep.package.clone(),
-                                                dep_manifest.clone(),
-                                            ));
-                                        }
-                                    }
-                                    DependencyManifest::Local(dep_manifest) => {
-                                        // Remote package has local dep - use version from manifest
-                                        let sub_version_req = dep_manifest
-                                            .publish
-                                            .as_ref()
-                                            .map_or(VersionReq::STAR, |p| p.version.clone());
-                                        pkg_deps.push(PackageDependency {
-                                            package: dep.package.clone(),
-                                            version_req: sub_version_req,
-                                        });
-                                    }
-                                }
-                            }
-                            dependencies_map.insert(version.clone(), pkg_deps);
-                        }
-                        // Skipping a version the registry refused to serve for now would
-                        // resolve to another one and rewrite Proto.lock.
-                        Err(DownloadFailure::Throttled(e)) => {
-                            return Err(e).wrap_err(DownloadError {
-                                name: pkg_name.clone(),
-                                version: manifest.version.clone(),
-                            });
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to fetch {}@{}: {} - skipping version",
-                                pkg_name,
-                                version,
-                                e.into_report()
-                            );
-                        }
-                    }
-                }
-
-                provider.add_package(
-                    pkg_name,
-                    PackageInfo {
-                        versions: versions.clone(),
-                        dependencies: dependencies_map,
+                        versions: vec![version.clone()],
+                        dependencies: HashMap::from([(version, pkg_deps)]),
                     },
                 );
             }
 
-            // Phase 3: Run PubGrub resolution
-            tracing::debug!(
-                "Running PubGrub resolution on {} packages...",
-                discovered.len()
-            );
+            tracing::debug!("Running PubGrub resolution");
 
-            match crate::pubgrub_resolver::resolve(&provider) {
+            match self.resolve_lazily(provider, &mut discovery).await? {
                 Ok(resolved) => break resolved,
-                Err(e) if use_lock && locked_candidates > 0 => {
+                Err(e) if use_lock && discovery.locked_candidates > 0 => {
+                    if self.locked {
+                        bail!(
+                            "Proto.lock does not satisfy the manifests, and a locked install cannot resolve them again:\n{}",
+                            e.message
+                        );
+                    }
+
                     tracing::info!(
                         "Proto.lock does not satisfy the manifests ({}), resolving against the registry",
                         e.message
                     );
                     use_lock = false;
                 }
-                Err(e) => {
-                    return Err(miette::miette!(
-                        "dependency resolution failed:\n{}",
-                        e.message
-                    ))
-                }
+                Err(e) => bail!("dependency resolution failed:\n{}", e.message),
             }
         };
+
+        if self.locked {
+            Self::check_locked_repositories(&discovery)?;
+        }
 
         tracing::debug!(
             "Resolved {} packages: {}",
@@ -1635,6 +1546,194 @@ impl<'a> DependencyGraphBuilder<'a> {
         Ok(deps)
     }
 
+    /// Runs `PubGrub` on a blocking thread while this task fetches the package metadata it asks
+    /// for, one request at a time.
+    ///
+    /// Returns the outcome of the resolution, or the error that stopped a fetch.
+    async fn resolve_lazily(
+        &self,
+        provider: BuffrsDependencyProvider,
+        discovery: &mut Discovery,
+    ) -> miette::Result<ResolutionResult> {
+        let (requests, mut pending) = tokio::sync::mpsc::unbounded_channel();
+        let provider = provider.with_source(ChannelSource(requests));
+        let resolution =
+            tokio::task::spawn_blocking(move || crate::pubgrub_resolver::resolve(&provider));
+
+        // The channel closes when the resolution ends and drops the provider.
+        let mut failure: Option<miette::Report> = None;
+        while let Some(request) = pending.recv().await {
+            match request {
+                SourceRequest::Versions(name, reply) => {
+                    let outcome = if failure.is_some() {
+                        Err(SourceAborted)
+                    } else {
+                        self.serve_versions(&name, discovery).await.map_err(|e| {
+                            failure = Some(e);
+                            SourceAborted
+                        })
+                    };
+                    reply.send(outcome).ok();
+                }
+                SourceRequest::Dependencies(name, version, reply) => {
+                    let outcome = if failure.is_some() {
+                        Err(SourceAborted)
+                    } else {
+                        self.serve_dependencies(&name, &version, discovery)
+                            .await
+                            .map_err(|e| {
+                                failure = Some(e);
+                                SourceAborted
+                            })
+                    };
+                    reply.send(outcome).ok();
+                }
+            }
+        }
+
+        let resolved = match resolution.await {
+            Ok(resolved) => resolved,
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(e) => return Err(e).into_diagnostic(),
+        };
+
+        match failure {
+            Some(e) => Err(e),
+            None => Ok(resolved),
+        }
+    }
+
+    /// The candidate versions of a remote package.
+    ///
+    /// While `Proto.lock` is in use, a locked package offers its locked version as the only
+    /// candidate, taken from the cache or a single download, so the registry is not listed.
+    async fn serve_versions(
+        &self,
+        name: &PackageName,
+        discovery: &mut Discovery,
+    ) -> miette::Result<Option<SourcePackage>> {
+        let Some(manifest) = discovery.manifests.get(name).cloned() else {
+            return Ok(None);
+        };
+
+        tracing::debug!("Discovering package: {}", name);
+
+        let locked = self
+            .lockfile
+            .find(name, &manifest.version, Some(&manifest.registry), None);
+
+        if discovery.use_lock {
+            match locked {
+                Some(locked) => {
+                    let package = self
+                        .try_fetch_remote(name, &manifest, &locked.version)
+                        .await
+                        .wrap_err(DownloadError {
+                            name: name.clone(),
+                            version: manifest.version.clone(),
+                        })?;
+
+                    if let Some(package) = package {
+                        let version = locked.version.clone();
+                        let dependencies = discovery.dependencies_of(&package);
+                        discovery.locked_candidates += 1;
+                        discovery
+                            .locked_entries
+                            .insert(name.clone(), locked.clone());
+
+                        return Ok(Some(SourcePackage {
+                            info: PackageInfo {
+                                versions: vec![version.clone()],
+                                dependencies: HashMap::from([(version.clone(), dependencies)]),
+                            },
+                            preferred: Some(version),
+                        }));
+                    }
+
+                    if self.locked {
+                        return Err(Self::missing_locked_artifact(
+                            name,
+                            &locked.version,
+                            &manifest.repository,
+                        ));
+                    }
+
+                    tracing::warn!(
+                        "{}@{} is pinned by Proto.lock but no longer in repository {}, resolving it against the registry",
+                        name,
+                        locked.version,
+                        manifest.repository
+                    );
+                }
+                None if self.locked => return Err(Self::not_locked(name, &manifest.version)),
+                None => {}
+            }
+        }
+
+        let versions = match discovery.listings.get(name) {
+            Some(versions) => versions.clone(),
+            None => {
+                let registry = self.create_artifactory(manifest.registry.clone().try_into()?)?;
+                let versions = registry
+                    .list_versions(manifest.repository.clone(), name.clone())
+                    .await?;
+
+                if versions.is_empty() {
+                    bail!(
+                        "no versions of {} found in repository {}",
+                        name,
+                        manifest.repository
+                    );
+                }
+
+                discovery.listings.insert(name.clone(), versions.clone());
+                versions
+            }
+        };
+
+        Ok(Some(SourcePackage {
+            info: PackageInfo {
+                versions,
+                dependencies: HashMap::new(),
+            },
+            preferred: locked.map(|locked| locked.version.clone()),
+        }))
+    }
+
+    /// The dependencies of a remote package version, or `None` if the registry lacks it.
+    async fn serve_dependencies(
+        &self,
+        name: &PackageName,
+        version: &Version,
+        discovery: &mut Discovery,
+    ) -> miette::Result<Option<Vec<PackageDependency>>> {
+        let Some(manifest) = discovery.manifests.get(name).cloned() else {
+            return Ok(None);
+        };
+
+        // Skipping a version the registry fails to serve for now would resolve to another one
+        // and rewrite Proto.lock, so only a missing version is skipped.
+        let package = self
+            .try_fetch_remote(name, &manifest, version)
+            .await
+            .wrap_err(DownloadError {
+                name: name.clone(),
+                version: manifest.version.clone(),
+            })?;
+
+        let Some(package) = package else {
+            tracing::warn!(
+                "{}@{} is listed in repository {} but cannot be downloaded - skipping version",
+                name,
+                version,
+                manifest.repository
+            );
+            return Ok(None);
+        };
+
+        Ok(Some(discovery.dependencies_of(&package)))
+    }
+
     /// Returns the given version of a remote package, or an error if the registry lacks it.
     async fn fetch_remote(
         &self,
@@ -1701,16 +1800,106 @@ impl<'a> DependencyGraphBuilder<'a> {
             Err(e) => return Err(e.into_report()),
         };
 
-        if locked.is_some_and(|locked| locked.validate(&package).is_err()) {
-            tracing::warn!(
-                "{name}@{version} in repository {} differs from the digest in Proto.lock",
-                manifest.repository
-            );
+        if let Some(locked) = locked {
+            self.check_digest(locked, &package, &manifest.repository)?;
         }
 
         self.remember(manifest, &package).await;
 
         Ok(Some(package))
+    }
+
+    /// Checks a downloaded package against the digest in `Proto.lock`.
+    ///
+    /// A mismatch fails a locked build and is a warning otherwise.
+    fn check_digest(
+        &self,
+        locked: &LockedPackage,
+        package: &Package,
+        repository: &str,
+    ) -> miette::Result<()> {
+        if locked.validate(package).is_ok() {
+            return Ok(());
+        }
+
+        if self.locked {
+            bail!(
+                "{}@{} in repository {} has digest {}, but Proto.lock pins digest {}",
+                locked.name,
+                locked.version,
+                repository,
+                package.digest(DigestAlgorithm::SHA256),
+                locked.digest
+            );
+        }
+
+        tracing::warn!(
+            "{}@{} in repository {} differs from the digest in Proto.lock",
+            locked.name,
+            locked.version,
+            repository
+        );
+
+        Ok(())
+    }
+
+    /// The error of a locked build for a dependency that `Proto.lock` does not pin.
+    fn not_locked(name: &PackageName, version_req: &VersionReq) -> miette::Report {
+        miette::miette!(
+            "{name} {version_req} has no matching entry in Proto.lock, and a locked install cannot add it"
+        )
+    }
+
+    /// Fails a locked build when `Proto.lock` pins a package to a repository that no manifest
+    /// naming the package requests.
+    ///
+    /// `Proto.lock` records one repository per package while manifests may request it from
+    /// several, so the lock entry is found without its repository and checked here, once every
+    /// manifest naming the package is known.
+    fn check_locked_repositories(discovery: &Discovery) -> miette::Result<()> {
+        let mut locked_entries: Vec<_> = discovery.locked_entries.iter().collect();
+        locked_entries.sort_by(|a, b| a.0.cmp(b.0));
+
+        for (name, locked) in locked_entries {
+            let mut repositories: Vec<&str> = discovery
+                .requested
+                .get(name)
+                .into_iter()
+                .flatten()
+                .filter(|(registry, _)| registry.same_registry(&locked.registry))
+                .map(|(_, repository)| repository.as_str())
+                .collect();
+
+            if repositories.contains(&locked.repository.as_str()) {
+                continue;
+            }
+
+            repositories.sort_unstable();
+            repositories.dedup();
+            let requested = match repositories.as_slice() {
+                [repository] => format!("repository {repository}"),
+                repositories => format!("repositories {}", repositories.join(", ")),
+            };
+
+            bail!(
+                "{name}@{} is locked to repository {} in Proto.lock, but the manifests request it from {requested}, and a locked install cannot change its repository",
+                locked.version,
+                locked.repository
+            );
+        }
+
+        Ok(())
+    }
+
+    /// The error of a locked build for a pinned version that cannot be fetched.
+    fn missing_locked_artifact(
+        name: &PackageName,
+        version: &Version,
+        repository: &str,
+    ) -> miette::Report {
+        miette::miette!(
+            "{name}@{version} is pinned by Proto.lock but is missing from repository {repository} and from the cache"
+        )
     }
 
     /// Stores a downloaded package in the cache and in this build's memory.

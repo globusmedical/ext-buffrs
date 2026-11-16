@@ -14,7 +14,7 @@
 
 use std::env;
 
-use buffrs::command::{self, GenerationOption, InstallMode};
+use buffrs::command::{self, GenerationOption, InstallMode, InstallOptions};
 use buffrs::config::Config;
 use buffrs::manifest::Manifest;
 use buffrs::package::PackageName;
@@ -140,6 +140,11 @@ enum Command {
         /// Generate buf.yaml file matching the installed dependencies
         #[clap(long, default_value = "false")]
         generate_buf_yaml: bool,
+
+        /// Install exactly what Proto.lock pins and leave it unchanged, failing instead of
+        /// resolving again. Also enabled by BUFFRS_LOCKED=1
+        #[clap(long, default_value = "false")]
+        locked: bool,
     },
 
     /// Uninstalls dependencies
@@ -340,6 +345,7 @@ async fn run(args: &[String]) -> miette::Result<()> {
         Command::Install {
             only_dependencies,
             generate_buf_yaml,
+            locked,
         } => {
             let mut generation_options = Vec::new();
 
@@ -353,9 +359,15 @@ async fn run(args: &[String]) -> miette::Result<()> {
                 InstallMode::All
             };
 
-            command::install(install_mode, &generation_options, &config, policy)
-                .await
-                .wrap_err(miette!("failed to install dependencies for `{package}`"))
+            command::install_with_options(
+                install_mode,
+                &generation_options,
+                &config,
+                policy,
+                InstallOptions { locked },
+            )
+            .await
+            .wrap_err(miette!("failed to install dependencies for `{package}`"))
         }
         Command::Uninstall => command::uninstall()
             .await
