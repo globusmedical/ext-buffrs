@@ -1,12 +1,11 @@
 {
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     flake-utils.url = "github:numtide/flake-utils";
     crane.url = "github:ipetkov/crane";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
-      inputs.flake-utils.follows = "flake-utils";
     };
     advisory-db = {
       url = "github:rustsec/advisory-db";
@@ -22,19 +21,12 @@
             inherit system;
             overlays = [ (import rust-overlay) ];
           };
-          inherit (pkgs) lib callPackage;
+          inherit (pkgs) callPackage;
           rustToolchain = callPackage ./nix/toolchain.nix { };
-
-          darwinFrameworks = with pkgs.darwin.apple_sdk.frameworks; [
-            Security
-            SystemConfiguration
-          ];
 
           devTools = [ rustToolchain ];
 
-          dependencies = with pkgs;
-            [ libiconv ]
-            ++ lib.lists.optionals stdenv.isDarwin darwinFrameworks;
+          dependencies = with pkgs; [ libiconv ];
 
           nativeBuildInputs = with pkgs; [ pkg-config ] ++ dependencies;
 
