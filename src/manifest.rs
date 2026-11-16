@@ -288,7 +288,8 @@ pub struct Manifest {
     pub edition: Edition,
     /// Metadata about the root package
     pub package: Option<PackageManifest>,
-    /// List of packages the root package depends on
+    /// List of packages the root package depends on, ordered by package name when the manifest
+    /// is parsed
     pub dependencies: Vec<Dependency>,
 }
 
@@ -331,9 +332,11 @@ impl Manifest {
             .into_diagnostic()
             .wrap_err(DeserializationError(ManagedFile::Manifest))?;
 
-        let dependencies = raw
-            .dependencies()
-            .iter()
+        let mut entries: Vec<_> = raw.dependencies().iter().collect();
+        entries.sort_by_key(|(toml_key, _)| *toml_key);
+
+        let mut dependencies = entries
+            .into_iter()
             .map(|(toml_key, manifest)| {
                 let (package, resolved_manifest) = match manifest {
                     DependencyManifest::Remote(remote_manifest) => {
@@ -397,6 +400,12 @@ impl Manifest {
                 })
             })
             .collect::<miette::Result<Vec<_>>>()?;
+
+        // The resolver walks dependencies in this order, and the order decides which requester's
+        // repository Proto.lock records for a package that several of them require. Two TOML keys
+        // can name the same package, so the entries are first put in TOML key order, which the
+        // stable sort keeps among dependencies on one package.
+        dependencies.sort_by(|a, b| a.package.cmp(&b.package));
 
         Ok(Self {
             edition: raw.edition(),
@@ -895,6 +904,46 @@ type = "api"
 "#;
         let manifest = Manifest::try_parse(toml, None).expect("should parse successfully");
         assert!(manifest.dependencies.is_empty());
+    }
+
+    /// Two TOML keys that alias one package are ordered by TOML key, on every parse.
+    #[test]
+    fn aliases_of_one_package_are_ordered_by_toml_key() {
+        let toml = r#"
+edition = "0.50"
+
+[dependencies]
+z-shared = { package = "lib-shared", version = "^0.1", repository = "first" }
+lib-other = { version = "^0.1", repository = "first" }
+a-shared = { package = "lib-shared", version = "^0.1", repository = "second" }
+m-shared = { package = "lib-shared", version = "^0.1", repository = "third" }
+"#;
+        let order = |manifest: Manifest| -> Vec<(String, String)> {
+            manifest
+                .dependencies
+                .into_iter()
+                .map(|dependency| {
+                    let DependencyManifest::Remote(remote) = dependency.manifest else {
+                        panic!("expected a remote dependency");
+                    };
+                    (dependency.package.to_string(), remote.repository)
+                })
+                .collect()
+        };
+
+        for _ in 0..50 {
+            let manifest = Manifest::try_parse(toml, None).expect("should parse successfully");
+
+            assert_eq!(
+                order(manifest),
+                [
+                    ("lib-other".to_owned(), "first".to_owned()),
+                    ("lib-shared".to_owned(), "second".to_owned()),
+                    ("lib-shared".to_owned(), "third".to_owned()),
+                    ("lib-shared".to_owned(), "first".to_owned()),
+                ]
+            );
+        }
     }
 
     /// Verify that omitting registry uses the default registry.

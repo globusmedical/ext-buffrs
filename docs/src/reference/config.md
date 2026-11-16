@@ -42,6 +42,8 @@ Define registry aliases for convenience:
 company = "https://artifactory.company.com/artifactory"
 ```
 
+A trailing slash in a registry URL is ignored: `https://artifactory.company.com/artifactory/` names the same registry.
+
 Then use in `Proto.toml`:
 
 ```toml

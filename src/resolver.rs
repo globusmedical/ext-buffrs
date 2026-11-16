@@ -889,10 +889,18 @@ impl<'a> DependencyGraphBuilder<'a> {
                     local_locked.registry,
             );
 
-            // Check cache if locked package matches manifest
+            // Check cache if locked package matches manifest. An entry that cannot be read, or
+            // whose content differs from the locked digest, is downloaded again.
             if version_req.matches(&local_locked.version) {
-                if let Some(cached) = self.cache.get(local_locked.try_into()?).await? {
-                    local_locked.validate(&cached)?;
+                let cached = self
+                    .cache
+                    .get(local_locked.try_into()?)
+                    .await
+                    .ok()
+                    .flatten()
+                    .filter(|cached| local_locked.validate(cached).is_ok());
+
+                if let Some(cached) = cached {
                     return Ok(cached);
                 }
             }
@@ -1087,7 +1095,7 @@ impl<'a> DependencyGraphBuilder<'a> {
                         &dependency.package,
                         &manifest.version,
                         Some(&manifest.registry),
-                        Some(&manifest.repository),
+                        None,
                     ) {
                         preferred_versions
                             .entry(dependency.package.clone())
@@ -1157,7 +1165,7 @@ impl<'a> DependencyGraphBuilder<'a> {
                                     &sub_dep.package,
                                     &sub_manifest.version,
                                     Some(&sub_manifest.registry),
-                                    Some(&sub_manifest.repository),
+                                    None,
                                 ) {
                                     preferred_versions
                                         .entry(sub_dep.package.clone())
@@ -1238,7 +1246,7 @@ impl<'a> DependencyGraphBuilder<'a> {
                             &sub_dep.package,
                             &sub_manifest.version,
                             Some(&sub_manifest.registry),
-                            Some(&sub_manifest.repository),
+                            None,
                         ) {
                             preferred_versions
                                 .entry(sub_dep.package.clone())
@@ -1333,7 +1341,7 @@ impl<'a> DependencyGraphBuilder<'a> {
                     &pkg_name,
                     &manifest.version,
                     Some(&manifest.registry),
-                    Some(&manifest.repository),
+                    None,
                 );
 
                 if let Some(locked) = locked {
@@ -1664,12 +1672,8 @@ impl<'a> DependencyGraphBuilder<'a> {
         let locked = VersionReq::parse(&format!("={version}"))
             .ok()
             .and_then(|exact| {
-                self.lockfile.find(
-                    name,
-                    &exact,
-                    Some(&manifest.registry),
-                    Some(&manifest.repository),
-                )
+                self.lockfile
+                    .find(name, &exact, Some(&manifest.registry), None)
             })
             .filter(|locked| &locked.version == version);
 
