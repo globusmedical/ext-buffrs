@@ -1149,6 +1149,72 @@ fn package_required_from_two_repositories_installs_from_the_lockfile() {
             ]
         );
         assert_eq!(lock, read_lock(&consumer_dir));
+
+        // A locked install accepts the repository locked for either requester.
+        install_locked(&consumer_dir, &buffrs_home);
+        assert_eq!(lock, read_lock(&consumer_dir));
+        remove_cache(&buffrs_home);
+        install_locked(&consumer_dir, &buffrs_home);
+        assert_eq!(lock, read_lock(&consumer_dir));
+    });
+}
+
+#[test]
+fn locked_install_rejects_a_dependency_moved_to_another_repository() {
+    const MIRROR: &str = "mirror";
+
+    with_probed_test_registry(|registry_url, _| {
+        let vfs = VirtualFileSystem::empty();
+        let buffrs_home = vfs.root().join("$HOME");
+        let root = vfs.root();
+
+        for repository in [REPOSITORY, MIRROR] {
+            publish_to(
+                &root,
+                &buffrs_home,
+                registry_url,
+                repository,
+                ("lib", "lib-shared", "0.1.0"),
+                "",
+            );
+        }
+
+        let consumer_dir = consumer(&root, &remote("lib-shared", "^0.1", registry_url));
+        install(&consumer_dir, &buffrs_home);
+        assert_eq!(
+            locked_field(&consumer_dir, "lib-shared", "repository"),
+            REPOSITORY
+        );
+        let lock = read_lock(&consumer_dir);
+
+        write_consumer_manifest(
+            &consumer_dir,
+            &remote_in(MIRROR, "lib-shared", "^0.1", registry_url),
+        );
+        let stderr = locked_install_fails(&consumer_dir, &buffrs_home, &["--locked"], &[]);
+        assert!(
+            stderr.contains(&format!(
+                "lib-shared@0.1.0 is locked to repository {REPOSITORY} in Proto.lock, but the manifests request it from repository {MIRROR}, and a locked install cannot change its repository"
+            )),
+            "{stderr}"
+        );
+        assert_eq!(read_lock(&consumer_dir), lock);
+
+        // The legacy resolver finds no lock entry in the requested repository.
+        write_config_text(&consumer_dir, "edition = \"0.10\"\n");
+        let stderr = locked_install_fails(&consumer_dir, &buffrs_home, &["--locked"], &[]);
+        assert!(
+            stderr.contains("lib-shared ^0.1 has no matching entry in Proto.lock"),
+            "{stderr}"
+        );
+        assert_eq!(read_lock(&consumer_dir), lock);
+
+        write_config(&consumer_dir);
+        install(&consumer_dir, &buffrs_home);
+        assert_eq!(
+            locked_field(&consumer_dir, "lib-shared", "repository"),
+            MIRROR
+        );
     });
 }
 

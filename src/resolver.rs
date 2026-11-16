@@ -191,9 +191,26 @@ struct Discovery {
     use_lock: bool,
     /// Number of packages offering their locked version in the current pass
     locked_candidates: usize,
+    /// Registry and repository of every manifest that names each remote package
+    requested: HashMap<PackageName, Vec<(RegistryRef, String)>>,
+    /// The `Proto.lock` entry offered as the only candidate of each package in the current pass
+    locked_entries: HashMap<PackageName, LockedPackage>,
 }
 
 impl Discovery {
+    /// Records a manifest naming a remote package. The first one is the package's manifest.
+    fn request(&mut self, name: &PackageName, manifest: &RemoteDependencyManifest) {
+        let requested = self.requested.entry(name.clone()).or_default();
+        let source = (manifest.registry.clone(), manifest.repository.clone());
+        if !requested.contains(&source) {
+            requested.push(source);
+        }
+
+        self.manifests
+            .entry(name.clone())
+            .or_insert_with(|| manifest.clone());
+    }
+
     /// The dependencies of a fetched remote package, remembering the manifests of its remote
     /// dependencies.
     fn dependencies_of(&mut self, package: &Package) -> Vec<PackageDependency> {
@@ -203,9 +220,7 @@ impl Discovery {
             .iter()
             .map(|dependency| match &dependency.manifest {
                 DependencyManifest::Remote(manifest) => {
-                    self.manifests
-                        .entry(dependency.package.clone())
-                        .or_insert_with(|| manifest.clone());
+                    self.request(&dependency.package, manifest);
 
                     PackageDependency {
                         package: dependency.package.clone(),
@@ -486,7 +501,8 @@ impl<'a> DependencyGraphBuilder<'a> {
     /// Makes the build use exactly what `Proto.lock` pins.
     ///
     /// The build then fails, naming the package, when a remote dependency has no matching lock
-    /// entry, when the locked versions do not satisfy the manifests, when a locked artifact is
+    /// entry, when the lock entry's repository is not one the manifests request the package
+    /// from, when the locked versions do not satisfy the manifests, when a locked artifact is
     /// missing from the registry and from the cache, or when a downloaded artifact differs from
     /// the digest in `Proto.lock`.
     #[must_use]
@@ -1349,8 +1365,8 @@ impl<'a> DependencyGraphBuilder<'a> {
         // Remote packages are listed and downloaded only when PubGrub first needs them, from the
         // registry and repository of the first manifest that names them.
         let mut discovery = Discovery::default();
-        for (name, manifest) in remote_deps_to_discover {
-            discovery.manifests.entry(name).or_insert(manifest);
+        for (name, manifest) in &remote_deps_to_discover {
+            discovery.request(name, manifest);
         }
 
         // Resolution runs once with the locked versions as the only candidates, which needs no
@@ -1360,6 +1376,7 @@ impl<'a> DependencyGraphBuilder<'a> {
         let resolved = loop {
             discovery.use_lock = use_lock;
             discovery.locked_candidates = 0;
+            discovery.locked_entries.clear();
 
             let provider = BuffrsDependencyProvider::new(root_deps.clone());
 
@@ -1420,6 +1437,10 @@ impl<'a> DependencyGraphBuilder<'a> {
                 Err(e) => bail!("dependency resolution failed:\n{}", e.message),
             }
         };
+
+        if self.locked {
+            Self::check_locked_repositories(&discovery)?;
+        }
 
         tracing::debug!(
             "Resolved {} packages: {}",
@@ -1616,6 +1637,9 @@ impl<'a> DependencyGraphBuilder<'a> {
                         let version = locked.version.clone();
                         let dependencies = discovery.dependencies_of(&package);
                         discovery.locked_candidates += 1;
+                        discovery
+                            .locked_entries
+                            .insert(name.clone(), locked.clone());
 
                         return Ok(Some(SourcePackage {
                             info: PackageInfo {
@@ -1824,6 +1848,47 @@ impl<'a> DependencyGraphBuilder<'a> {
         miette::miette!(
             "{name} {version_req} has no matching entry in Proto.lock, and a locked install cannot add it"
         )
+    }
+
+    /// Fails a locked build when `Proto.lock` pins a package to a repository that no manifest
+    /// naming the package requests.
+    ///
+    /// `Proto.lock` records one repository per package while manifests may request it from
+    /// several, so the lock entry is found without its repository and checked here, once every
+    /// manifest naming the package is known.
+    fn check_locked_repositories(discovery: &Discovery) -> miette::Result<()> {
+        let mut locked_entries: Vec<_> = discovery.locked_entries.iter().collect();
+        locked_entries.sort_by(|a, b| a.0.cmp(b.0));
+
+        for (name, locked) in locked_entries {
+            let mut repositories: Vec<&str> = discovery
+                .requested
+                .get(name)
+                .into_iter()
+                .flatten()
+                .filter(|(registry, _)| registry.same_registry(&locked.registry))
+                .map(|(_, repository)| repository.as_str())
+                .collect();
+
+            if repositories.contains(&locked.repository.as_str()) {
+                continue;
+            }
+
+            repositories.sort_unstable();
+            repositories.dedup();
+            let requested = match repositories.as_slice() {
+                [repository] => format!("repository {repository}"),
+                repositories => format!("repositories {}", repositories.join(", ")),
+            };
+
+            bail!(
+                "{name}@{} is locked to repository {} in Proto.lock, but the manifests request it from {requested}, and a locked install cannot change its repository",
+                locked.version,
+                locked.repository
+            );
+        }
+
+        Ok(())
     }
 
     /// The error of a locked build for a pinned version that cannot be fetched.

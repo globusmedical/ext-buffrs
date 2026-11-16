@@ -65,6 +65,8 @@ unchanged. Use it in CI to build what was reviewed. The install fails, naming
 the package, when:
 
 - a remote dependency has no matching entry in the lockfile,
+- the lockfile pins a package to a repository that no dependency requests it
+  from,
 - the locked versions do not satisfy the manifests,
 - a locked package is missing from both the registry and the cache, or
 - a downloaded package differs from the digest in the lockfile.

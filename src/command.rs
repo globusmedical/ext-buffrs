@@ -407,7 +407,8 @@ pub struct InstallOptions {
     /// Install exactly what `Proto.lock` pins and leave it unchanged.
     ///
     /// The install fails, naming the package, when a remote dependency has no matching lock
-    /// entry, when the locked versions do not satisfy the manifests, when a locked artifact is
+    /// entry, when the lock entry's repository is not one the manifests request the package
+    /// from, when the locked versions do not satisfy the manifests, when a locked artifact is
     /// missing from the registry and from the cache, or when a downloaded artifact differs from
     /// the digest in `Proto.lock`. Setting [`LOCKED_ENV_VAR`] to `1` or `true` has the same
     /// effect.
