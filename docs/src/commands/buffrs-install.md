@@ -4,7 +4,7 @@ Downloads and installs dependencies specified in the manifest.
 
 ### Synopsis
 
-`buffrs install`
+`buffrs install [--locked] [--only-dependencies] [--generate-buf-yaml]`
 
 ### Description
 
@@ -39,15 +39,35 @@ one doesn't exist when the command is invoked, one is created after the
 installation has completed.
 
 If dependencies have been added or removed since the last invocation, the
-lockfile will be modified accordingly. If the manifest requirements conflict
-with the lockfile (i.e. the manifest requests a different version than the one
-that was locked), installation will fail.
+lockfile will be modified accordingly. If the locked versions no longer satisfy
+the manifests, the dependencies are resolved again against the registry and the
+new versions are locked.
+
+A locked version is installed from the cache or with a single download. The
+registry is only asked which versions exist for packages without a usable lock
+entry, and only the versions that resolution considers are downloaded.
+
+If a downloaded package differs from the digest in the lockfile, the install
+warns and locks the new digest.
 
 Versions are locked upon first installation, and will persist until the lockfile
 is regenerated with `buffrs lock`, dependencies are explicitly upgraded via
 `buffrs update` (or a manual edit of the manifest) or they have been removed.
 Once removed, if dependencies are added back again, a different version may be
 automatically selected and locked.
+
+##### Locked installs
+
+`buffrs install --locked`, or `BUFFRS_LOCKED=1` (see
+[Environment Variables](../reference/environment-variables.md#buffrs_locked)),
+installs exactly the versions that `Proto.lock` pins and leaves the lockfile
+unchanged. Use it in CI to build what was reviewed. The install fails, naming
+the package, when:
+
+- a remote dependency has no matching entry in the lockfile,
+- the locked versions do not satisfy the manifests,
+- a locked package is missing from both the registry and the cache, or
+- a downloaded package differs from the digest in the lockfile.
 
 ##### Transitive dependencies
 

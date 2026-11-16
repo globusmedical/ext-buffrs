@@ -57,6 +57,11 @@ time
 
 You can now develop your library and publish it using `buffrs publish`.
 
+Commit the `Proto.lock` that `buffrs install` writes. In CI, run
+`buffrs install --locked` to install exactly the locked versions, failing
+instead of resolving again (see
+[locked installs](../commands/buffrs-install.md#locked-installs)).
+
 ##### Servers
 
 If you want to implement your server and thus use e.g. a `logging` API the only
